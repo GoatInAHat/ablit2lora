@@ -1,0 +1,14 @@
+.venv/
+.tmp/
+.pipcache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+adapter*/
+*.safetensors
+directions.safetensors*
+eval.json
