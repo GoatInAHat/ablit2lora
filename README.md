@@ -1,164 +1,164 @@
 # ablit2lora
 
-Abliteration without a second model copy. Refusal-direction
-orthogonalization is **exactly rank 1**, so it ships as a standard PEFT LoRA
-adapter: the base weights stay untouched on disk, and vLLM serves base +
-adapter with `--enable-lora` — hot-swappable per request, one copy,
-~MBs instead of ~GBs.
+**Pure converter**: turn a *published* abliterated checkpoint into a
+MB-scale LoRA adapter -- keep one base copy, hot-swap the edit in vLLM.
 
-First-class target: **GLM-5.3-Flash** (arch `glm5_next`, MoE) — and any
-Llama/GLM/Qwen-style decoder, dense or MoE.
+ablit2lora does **not** find refusal directions and does not compete with
+the abliteration labs. They do the science -- contrastive direction search,
+orthogonalization, retraining -- and publish full modified checkpoints.
+This tool converts those artifacts into PEFT LoRA adapters so you never
+keep a second full copy of the weights:
 
-## The math
+        published abliteration        ablit2lora convert        adapter (~MB)
+        (full checkpoint,     ────►   diff + SVD rank    ────►  + manifest.json
+         transient download)          diagnostics
+                                                                  │
+      base model (untouched)  ◄───────────────────────────────────┘
+                │
+                ▼
+      vllm serve base --enable-lora --lora-modules abliterated=adapter
+                          (no second copy)
 
-Abliteration (in the style of Arditi et al., *Refusal in LLMs is mediated by
-a single direction*) projects a unit refusal direction `d` out of the
-residual stream at chosen module boundaries. For a linear module `y = W x`:
+**Transient workflow:** download the abliteration, convert it, *delete the
+abliteration copy*, keep base + adapter. Disk: one base + MBs, not one
+full checkpoint per variant.
 
-    W' = W - d d^T W          (output-side orthogonalization)
+First-class target: **GLM-5.3-Flash** (arch glm5_next, MoE) -- and any
+Llama/GLM/Qwen-style decoder, dense or MoE. convert and bake operate at
+the safetensors level, never load the model, and are architecture-agnostic.
 
-The removed term is an outer product, so the edit is exactly rank 1:
+## Credits
 
-    W - d d^T W  ==  W + B @ A,   A = d^T W,  B = -d
+The checkpoints this tool consumes exist because of the abliteration labs,
+building on the research lineage of Arditi et al., *Refusal in LLMs is
+mediated by a single direction*:
 
-PEFT applies `W + (lora_alpha / r) * B @ A`. With `r = 1` and
-`lora_alpha = 1` the scale is exactly 1.0 and the adapter is the
-orthogonalization — no training, no approximation. `--alpha 1.0` is the exact
-projection; larger values over-abliterate.
+- **audnai/penclaw** -- abliterated checkpoint releases
+- **orcarouter** -- abliterated/decensored model family
+- **dealignai** -- dealignment releases
+- **huihui-ai** -- abliterated checkpoints across many architectures
+- ...and everyone else publishing diffs of their work
 
-`--side both` emits the exact double projection
-`W' = P_out W P_in` as a **rank-3** adapter (each removed term plus the cross
-term is rank <= 1):
+Not affiliated with any of them. The science and the checkpoints are
+theirs -- go read and star their repos. ablit2lora only re-expresses their
+published edits as adapters.
 
-    A = [d_o^T W ; d_in^T ; d_in^T],   B = [-d_o , -W d_in , (d_o^T W d_in) d_o]
+## How convert works
 
-### Extract
+    ablit2lora convert --base <hf-id-or-path> --abliterated <hf-id-or-path> \
+      [--tol 1e-3] [--max-rank 8] [--out adapter]
 
-`ablit2lora extract` hooks every selected decoder layer, runs harmful vs
-benign prompt sets, and saves the normalized mean-difference direction of the
-residual stream at each layer boundary (plus a contrast score per layer and
-an optional PCA estimate). Direction files are one small safetensors.
+1. **Stream both checkpoints lazily** (safetensors memory-mapping; two
+   tensors in RAM at a time, never full copies) and match tensors by name.
+2. **Per matched tensor**: delta = W_ablit - W_base, then one exact SVD:
+   - rank-1 residual < tol -> exact r=1 LoRA factors (the classic
+     abliteration case)
+   - otherwise escalate rank until the residual < tol or --max-rank,
+     recording the residual per tensor
+   - unchanged tensors are skipped
+   - genuinely-retrained tensors (residual never < tol) are **flagged in
+     manifest.json, not silently approximated**; opt in with
+     --include-flagged for best-effort factors
+3. **Emit**: a PEFT-compatible adapter (factors zero-padded to a uniform
+   rank, lora_alpha == r so the LoRA scale is exactly 1.0), a
+   manifest.json (per-tensor sha refs, delta norm, chosen rank, residual),
+   and the ready-to-run vLLM serve command.
 
-### Emit
+**Precision guidance.** The per-tensor diff runs in float32 on top of each
+side's storage dtype. Compare checkpoints at matching precision -- BF16
+base vs BF16 abliteration, FP8 vs FP8: quantized-vs-quantized or
+mixed-precision diffs carry quantization noise, which surfaces as flagged
+tensors instead of a clean low-rank edit. Diff at the highest precision
+both sides share (BF16 before FP8), and quantize after converting. Adapter
+factors default to float32; bfloat16 halves the size but can miss small
+tolerances.
 
-`ablit2lora emit` reads the base weights lazily (one tensor at a time via
-safetensors memory mapping — never the whole model in RAM) and writes the
-adapter: for each target module `A = d^T W`, `B = -alpha * d` with PEFT
-scaling 1. Defaults target every `o_proj` and `down_proj` in the selected
-layers — the modules that *write into* the residual stream, which is where a
-residual-space direction lives.
+## Quickstart (GLM-5.3-Flash)
 
-## MoE models (GLM-5.3-Flash / glm5_next)
-
-Target selection is per fully-qualified module path, so MoE works unchanged:
-
-every per-expert module (`model.layers.N.experts.k.down_proj`) and every
-expert-shared module (`...shared_experts.down_proj`) receives its own exact
-rank-1 edit keyed to its layer's direction. Expert-shared modules are edited
-**once**, not per expert. Per-expert *directions* (rather than the shared
-residual direction) would need expert-routed attribution and are intentionally
-out of scope; the shared direction is the standard practice.
-
-For `glm5_next` and similar MoE archs, extraction requires a transformers
-build that can load the model (possibly `--trust-remote-code` or a newer
-version). `emit` and `bake` are safetensors-level and architecture-agnostic —
-they work on any shard layout.
-
-## Quickstart
-
-    # 1. directions from contrasting activations (GPU box with the weights)
-    ablit2lora extract --model zai-org/GLM-5.3-Flash \\
-      --harmful harmful.jsonl --benign benign.jsonl --chat \\
-      --out glm53flash-dirs.safetensors
-
-    # 2. exact rank-1 adapter (~MBs)
-    ablit2lora emit --direction glm53flash-dirs.safetensors \\
-      --model zai-org/GLM-5.3-Flash --layers 8-40:2 \\
-      --shared-direction 24 --out adapter-glm53flash-ablit
-
-    # 3. serve base + adapter (one copy on disk)
-    ablit2lora serve --base zai-org/GLM-5.3-Flash \\
+    # transient: fetch the published abliteration at the same precision as the base
+    ablit2lora convert \
+      --base zai-org/GLM-5.3-Flash \
+      --abliterated <lab>/GLM-5.3-Flash-abliterated \
+      --tol 1e-3 --max-rank 8 \
+      --out adapter-glm53flash-ablit
+    # then delete the abliteration copy; serve base + adapter (one copy):
+    ablit2lora serve --base zai-org/GLM-5.3-Flash \
       --adapter adapter-glm53flash-ablit --script serve.sh
+    # verify fidelity: base+adapter should match the abliterated reference's
+    # refusal behavior while perplexity stays near the plain base
+    ablit2lora eval --base zai-org/GLM-5.3-Flash \
+      --abliterated <lab>/GLM-5.3-Flash-abliterated \
+      --adapter adapter-glm53flash-ablit \
+      --harmful harmful.jsonl --ppl-file benign.jsonl
 
-    # 4. sanity: refusal rate vs base, perplexity drift
-    ablit2lora eval --base zai-org/GLM-5.3-Flash \\
-      --adapter adapter-glm53flash-ablit --harmful harmful.jsonl \\
-      --ppl-file benign.jsonl
+## eval
 
-Layer specs: `all | even | odd | 0,3,7 | 8-24 | 8-24:2 | 10-` (open end).
-`--shared-direction N` applies layer N's direction everywhere (classic
-single-direction abliteration); the default uses each layer's own direction.
+Side-by-side harness: refusal rate over a harmful-prompt set (greedy
+generations, conservative keyword classifier -- harness-grade, not a
+safety evaluation) and perplexity over benign text, for the plain base,
+base+adapter, and optionally the abliterated reference checkpoint. vLLM
+backend preferred; transformers fallback.
 
-## Disk savings
+## bake (optional fused export)
 
-Adapter bytes = sum over targets of (in_dim + out_dim) * dtype_size * r.
+For pipelines that cannot carry a LoRA at serve time (some quantized/edge
+runtimes). Prefer serve; bake is the escape hatch:
 
-| Artifact | Size (order of magnitude) |
-|---|---|
-| Full abliterated copy (e.g. 30B-class MoE, bf16) | ~60 GB |
-| Same, FP8 quant variant | ~30 GB (a second full copy per quant) |
-| **ablit2lora adapter (r=1, bf16, all o_proj+down_proj)** | **~10-50 MB** |
-| Direction file | ~KB-MB |
+    ablit2lora bake --adapter adapter-glm53flash-ablit --model <base> \
+      --output glm53flash-ablit-fused
 
-Illustrative for a GLM-5.3-Flash-class MoE; `emit` prints the exact sizes for
-your model. Every additional variant (different alpha, layers, dtype) is
-another MB-scale adapter against the same base — vs a full re-release per
-variant.
+Streams tensors shard by shard (flat RAM, preserved shard layout +
+configs). Steady-state disk keeps a single serving copy; peak = base +
+fused during the pass -- verify, then delete the source copy and adapter.
 
-## vs full-copy abliterated releases
+## vLLM snippet + quantization notes
 
-Community releases (audnai/penclaw, orcarouter, dealainai-style repos)
-distribute complete modified model snapshots:
+    vllm serve zai-org/GLM-5.3-Flash \
+      --enable-lora \
+      --lora-modules abliterated=/data/adapters/glm53flash-ablit \
+      --max-lora-rank 8
 
-| | Full-copy releases | ablit2lora |
-|---|---|---|
-| Disk | one full copy per variant (plus per-quant re-releases) | one base + MB-scale adapters |
-| Hot swap | no — swap model dirs, restart | per-request LoRA name, no restart |
-| Variants (alpha/layers) | re-run full export each time | re-emit adapter in seconds |
-| Provenance | opaque diff vs base | base untouched; edit is auditable algebra |
-
-(Not affiliated with those projects; sizes/claims reflect their published
-artifact layout, not benchmarks we ran.)
-
-## vLLM snippet
-
-```bash
-vllm serve zai-org/GLM-5.3-Flash \\
-  --enable-lora \\
-  --lora-modules abliterated=/data/adapters/glm53flash-ablit \\
-  --max-lora-rank 8
-```
-
-Then per request: `"model": "abliterated"` uses the orthogonalized behavior;
-omitting it uses the untouched base. `ablit2lora serve` prints this command
-plus compatibility notes:
+Per request: "model": "abliterated" uses the converted behavior; omitting
+it uses the untouched base.
 
 - **BF16/FP16 base + LoRA**: fully supported.
 - **FP8 (W8A8) base + LoRA**: supported for major architectures on recent
-  vLLM; if startup rejects the adapter, upgrade vLLM or `bake`.
+  vLLM; if startup rejects the adapter, upgrade vLLM or bake.
 - **NVFP4/MXFP4 (ModelOpt) base + LoRA**: newer and architecture-limited;
-  the reliable fallback on any quantized base is `bake`.
-- Adapter scale is exactly 1.0 (`lora_alpha == r`), so served weights equal
-  the algebraic orthogonalization in the serving dtype.
+  LoRA-over-NVFP4 is young -- check your vLLM release notes, and treat
+  bake as the reliable fallback on any quantized base.
+- Converted adapters use lora_alpha == r (LoRA scale exactly 1.0), so
+  served weights equal base + the measured delta in the serving dtype.
 
-## bake (optional fused pass)
+## Disk savings
 
-`ablit2lora bake --adapter adapter-glm53flash-ablit --model <base> \\
-  --output glm53flash-ablit-bf16 [--fix-bias]`
+Adapter bytes = sum over converted modules of (in_dim + out_dim) x
+dtype_size x rank.
 
-Streams tensors shard-by-shard (flat RAM, preserved shard layout + configs)
-so steady-state disk still holds only one serving copy; peak = base + baked
-during the pass. `--fix-bias` also orthogonalizes biases (the one term LoRA
-cannot express; usually negligible, reported by `emit`).
+| Artifact | Size (order of magnitude) |
+|---|---|
+| Full abliterated copy (30B-class MoE, bf16) | ~60 GB |
+| Same, FP8 quant variant | ~30 GB (a second full copy per quant) |
+| **ablit2lora adapter (r <= 8, fp32, changed modules only)** | **~10-100 MB** |
+| manifest.json | KBs |
+
+Illustrative for a GLM-5.3-Flash-class MoE; convert prints exact sizes for
+your pair. Every additional variant is another MB-scale adapter against
+the same base -- vs a full re-release per variant.
 
 ## Limitations
 
-- Bias terms keep their `d`-component in LoRA mode (reported; `bake --fix-bias`
-  removes them exactly).
-- Direction quality depends on the prompt sets; check `emit`'s delta norms
-  and the `eval` refusal/PPL harness before trusting an adapter.
-- Abliteration reduces measured refusal, not all safety behavior; treat as a
-  research/safety-evaluation tool, not a guarantee.
+- LoRA cannot edit biases, norms, or other non-2D tensors: changes there
+  are reported as unrepresentable in manifest.json, never applied.
+- Flagged (retrained) tensors are excluded by default: base+adapter
+  reproduces the abliterated model only up to the flagged deltas listed in
+  manifest.json. Use eval to judge the gap.
+- Refusal classification in eval is a keyword heuristic: harness-grade,
+  not a safety evaluation. Abliteration reduces measured refusal, not all
+  safety behavior; treat as a research/safety-evaluation tool.
+- v0.1.0's direction finding (extract/emit) was removed by design: this
+  tool is a pure converter and does not compete with the abliteration
+  labs.
 
 ## Dev
 
@@ -166,8 +166,12 @@ cannot express; usually negligible, reported by `emit`).
     .venv/bin/ruff check src tests
     .venv/bin/python -m pytest -q
 
-Tests are CPU-only with a tiny random-weight LlamaForCausalLM — no downloads.
-The key test proves: emitted LoRA applied to base **==** directly
-orthogonalized weights (fp32, max |diff| < 1e-5), end-to-end through PEFT.
+Tests are CPU-only with synthetic safetensors checkpoint pairs (exact
+rank-1 edits, rank-3 edits, fully retrained tensors, changed 1-D tensors)
+plus a tiny random-weight LlamaForCausalLM for the PEFT end-to-end -- no
+downloads. Key tests: an exact rank-1 edit converts to r=1 with residual
+~0; rank-3 edits escalate to the true rank; retrained tensors are flagged,
+never approximated; and a PEFT merge of the converted adapter reproduces
+the abliterated weights.
 
 MIT license. Python >= 3.10.

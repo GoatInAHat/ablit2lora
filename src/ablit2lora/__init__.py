@@ -1,8 +1,10 @@
-"""ablit2lora: abliteration as a rank-1 (or rank-3) LoRA adapter.
+"""ablit2lora: convert published abliterated checkpoints into LoRA adapters.
 
-Refusal-direction orthogonalization W' = W - d d^T W is exactly rank 1, so
-the edit ships as a standard PEFT LoRA adapter: one base model copy on
-disk, hot-swappable in vLLM via --enable-lora.
+Pure converter: the abliteration labs (audnai/penclaw, orcarouter, dealignai,
+huihui-ai, ...) do the science and publish modified checkpoints; ablit2lora
+diffs such a checkpoint against its base and re-expresses the edit as a
+MB-scale PEFT LoRA adapter -- one base model copy on disk, hot-swappable in
+vLLM via --enable-lora. ablit2lora never finds refusal directions itself.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

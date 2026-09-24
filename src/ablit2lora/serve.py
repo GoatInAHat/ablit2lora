@@ -12,19 +12,24 @@ import shlex
 import stat
 from pathlib import Path
 
-NOTES = """\
-vLLM / quantization compatibility notes
-- BF16 / FP16 base + LoRA: fully supported.
-- FP8 (W8A8) base + LoRA: supported for major architectures on recent vLLM;
-  if vllm serve rejects the adapter, upgrade vLLM or use ablit2lora bake.
-- NVFP4 / MXFP4 (ModelOpt) base + LoRA: newer and more architecture-limited;
-  the reliable fallback on any quantized base is ablit2lora bake.
-- This adapter is rank <= 3 with lora_alpha == r, so the LoRA scale is
-  exactly 1.0: served weights equal the algebraic orthogonalization in the
-  serving dtype.
-- Hot swap: pass model=<name> per request to use the abliterated behavior;
-  omit it to use the base. No restart, no second copy.
-"""
+NOTES = (
+    "vLLM / quantization compatibility notes\n"
+    "- BF16 / FP16 base + LoRA: fully supported.\n"
+    "- FP8 (W8A8) base + LoRA: supported for major architectures on recent "
+    "vLLM;\n"
+    "  if vllm serve rejects the adapter, upgrade vLLM or use ablit2lora "
+    "bake.\n"
+    "- NVFP4 / MXFP4 (ModelOpt) base + LoRA: newer and architecture-limited;\n"
+    "  LoRA-over-NVFP4 is young -- check your vLLM release notes, and treat "
+    "bake\n"
+    "  as the reliable fallback on any quantized base.\n"
+    "- Converted adapters use lora_alpha == r (LoRA scale exactly 1.0), so "
+    "served\n"
+    "  weights equal base + the measured delta in the serving dtype.\n"
+    "- Hot swap: pass model=<name> per request to use the abliterated "
+    "behavior;\n"
+    "  omit it to use the base. No restart, no second copy.\n"
+)
 
 
 def build_command(

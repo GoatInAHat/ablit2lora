@@ -1,15 +1,19 @@
-"""CLI smoke tests + end-to-end: extract -> emit -> PEFT merge == orthogonal.
-
-Runs a tiny random-weight LlamaForCausalLM on CPU; no downloads.
-"""
+"""CLI smoke tests + end-to-end convert/serve/bake on synthetic checkpoints."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
+import torch
+from safetensors.torch import load_file
+
+O1 = "model.layers.0.self_attn.o_proj.weight"
+O2 = "model.layers.1.self_attn.o_proj.weight"
+D2 = "model.layers.2.mlp.down_proj.weight"
+D3 = "model.layers.3.mlp.down_proj.weight"
 
 
 def _run(*args):
@@ -21,7 +25,12 @@ def _run(*args):
     )
 
 
-@pytest.mark.parametrize("cmd", ["extract", "emit", "bake", "serve", "eval"])
+def _flat(s: str) -> str:
+    """Collapse the serve command's backslash-newline continuations."""
+    return " ".join(s.replace(chr(92) + "\n", " ").split())
+
+
+@pytest.mark.parametrize("cmd", ["convert", "serve", "eval", "bake"])
 def test_help(cmd):
     r = _run(cmd, "--help")
     assert r.returncode == 0, r.stderr
@@ -30,54 +39,71 @@ def test_help(cmd):
 
 def test_version():
     r = _run("--version")
-    assert r.returncode == 0 and "0.1.0" in r.stdout
+    assert r.returncode == 0 and "0.2.0" in r.stdout
 
 
-def test_end_to_end_tiny(tmp_path, tiny_model_dir, prompt_files):
-    harmful, benign = prompt_files
-    dirs = tmp_path / "dirs.safetensors"
+def _convert_cli(tmp_path, pair, *extra):
+    out = tmp_path / "adapter"
     r = _run(
-        "extract", "--model", str(tiny_model_dir),
-        "--harmful", str(harmful), "--benign", str(benign),
-        "--layers", "all", "--batch-size", "8",
-        "--max-length", "64", "--out", str(dirs),
+        "convert",
+        "--base", str(pair.base_dir),
+        "--abliterated", str(pair.ablit_dir),
+        "--out", str(out),
+        *extra,
+    )
+    return r, out
+
+
+def test_convert_end_to_end(tmp_path, mixed_pair):
+    r, out = _convert_cli(tmp_path, mixed_pair)
+    assert r.returncode == 0, r.stderr
+    assert (out / "adapter_model.safetensors").exists()
+    assert (out / "adapter_config.json").exists()
+    assert (out / "manifest.json").exists()
+    flat = _flat(r.stdout)
+    assert "vllm serve" in flat and "--enable-lora" in flat
+    cfg = json.loads((out / "adapter_config.json").read_text())
+    assert cfg["r"] == cfg["lora_alpha"] == 3
+    assert "model.layers.2.mlp.down_proj" not in cfg["target_modules"]
+    assert len(cfg["target_modules"]) == 2
+
+
+def test_serve_command(tmp_path, mixed_pair):
+    _r, out = _convert_cli(tmp_path, mixed_pair)
+    r = _run("serve", "--base", str(mixed_pair.base_dir), "--adapter", str(out))
+    assert r.returncode == 0, r.stderr
+    flat = _flat(r.stdout)
+    assert "vllm serve" in flat
+    assert "--lora-modules abliterated=" in flat
+    assert "--max-lora-rank 8" in flat
+
+
+def test_bake_fuses_only_converted(tmp_path, mixed_pair):
+    _r, out = _convert_cli(tmp_path, mixed_pair)
+    fused = tmp_path / "fused"
+    r = _run(
+        "bake",
+        "--adapter", str(out),
+        "--model", str(mixed_pair.base_dir),
+        "--output", str(fused),
     )
     assert r.returncode == 0, r.stderr
-    assert dirs.exists() and Path(str(dirs) + ".json").exists()
+    W = load_file(str(fused / "model.safetensors"))
+    b, a = mixed_pair.base, mixed_pair.ablit
+    for name in (O1, O2):
+        assert torch.allclose(W[name], a[name], atol=1e-4), name
+    assert torch.equal(W[D2], b[D2])
+    assert torch.equal(W[D3], b[D3])
+    assert (fused / "config.json").exists()
 
-    adapter = tmp_path / "adapter"
+
+def test_identical_checkpoints_no_adapter(tmp_path, mixed_pair):
+    out = tmp_path / "ad"
     r = _run(
-        "emit", "--direction", str(dirs), "--model", str(tiny_model_dir),
-        "--layers", "0-2", "--modules", "o_proj,down_proj",
-        "--alpha", "1.0", "--out", str(adapter),
+        "convert",
+        "--base", str(mixed_pair.base_dir),
+        "--abliterated", str(mixed_pair.base_dir),
+        "--out", str(out),
     )
-    assert r.returncode == 0, r.stderr
-    assert (adapter / "adapter_model.safetensors").exists()
-    assert (adapter / "adapter_config.json").exists()
-
-    _verify_merge_matches_orthogonalization(tiny_model_dir, dirs, adapter)
-
-    r = _run("serve", "--base", str(tiny_model_dir), "--adapter", str(adapter))
-    assert r.returncode == 0, r.stderr
-    assert "vllm serve" in r.stdout and "--enable-lora" in r.stdout
-
-
-def _verify_merge_matches_orthogonalization(model_dir, dirs, adapter):
-    peft = pytest.importorskip("peft")
-    import torch
-    from safetensors.torch import load_file
-    from transformers import LlamaForCausalLM
-
-    sd = load_file(str(dirs))
-    base = LlamaForCausalLM.from_pretrained(str(model_dir))
-    orig = {k: v.clone() for k, v in base.state_dict().items()}
-    model = peft.PeftModel.from_pretrained(base, str(adapter))
-    merged = model.merge_and_unload()
-    for li in range(3):
-        d = sd[f"layer.{li}"]
-        o = merged.model.layers[li].self_attn.o_proj.weight
-        wo = orig[f"model.layers.{li}.self_attn.o_proj.weight"]
-        assert torch.allclose(o, wo - torch.outer(d, d @ wo), atol=1e-5), li
-        dn = merged.model.layers[li].mlp.down_proj.weight
-        wn = orig[f"model.layers.{li}.mlp.down_proj.weight"]
-        assert torch.allclose(dn, wn - torch.outer(d, d @ wn), atol=1e-5), li
+    assert r.returncode != 0
+    assert (out / "manifest.json").exists()

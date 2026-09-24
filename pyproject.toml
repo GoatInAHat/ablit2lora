@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ablit2lora"
-version = "0.1.0"
-description = "Abliteration as a rank-1 LoRA: refusal-direction orthogonalization emitted as a PEFT adapter, no second model copy."
+version = "0.2.0"
+description = "Convert published abliterated checkpoints into MB-scale PEFT LoRA adapters: one base copy, hot-swappable in vLLM."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Bennett Vernon" }]
-keywords = ["abliteration", "lora", "peft", "refusal-direction", "vllm", "glm"]
+keywords = ["abliteration", "abliterated", "lora", "peft", "converter", "vllm", "glm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",

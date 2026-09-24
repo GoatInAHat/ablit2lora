@@ -1,15 +1,13 @@
 """Lazy, low-memory access to a model's safetensors shards.
 
-emit/bake never need the whole model in RAM: they map tensor names to shards
-up front and read one tensor at a time via safetensors memory-mapping.
+convert/bake never need the whole model in RAM: they map tensor names to
+shards up front and read one tensor at a time via safetensors memory-mapping.
 """
 
 from __future__ import annotations
 
 import glob
-import json
 import os
-from collections.abc import Iterable
 from dataclasses import dataclass
 
 from safetensors import safe_open
@@ -64,25 +62,3 @@ class LazyWeights:
 
     def keys(self):
         return self.tensors.keys()
-
-
-def model_num_layers(model_path: str, weight_names: Iterable[str]) -> int:
-    """Decoder layer count from config.json if possible, else inferred."""
-    cfg_path = os.path.join(model_path, "config.json")
-    if os.path.isfile(cfg_path):
-        with open(cfg_path) as fh:
-            cfg = json.load(fh)
-        tc = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else cfg
-        for key in ("num_hidden_layers", "num_layers", "n_layer"):
-            if isinstance(tc, dict) and tc.get(key) is not None:
-                return int(tc[key])
-    from .names import layer_of
-
-    best = -1
-    for name in weight_names:
-        idx = layer_of(name)
-        if idx is not None:
-            best = max(best, idx)
-    if best < 0:
-        raise ValueError("cannot determine decoder layer count for model")
-    return best + 1
