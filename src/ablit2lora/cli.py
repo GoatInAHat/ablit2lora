@@ -46,8 +46,9 @@ def _add_emit(sub):
                    help="module suffixes; defaults cover MoE experts + shared")
     p.add_argument("--side", choices=["output", "input", "both"], default="output",
                    help="which space to orthogonalize; both => exact rank-3")
-    p.add_argument("--alpha", type=float, default=1.0,
-                   help="1.0 = exact orthogonalization; >1 over-abliterates")
+    p.add_argument("--alpha", "--scale", type=float, default=1.0,
+                   help="1.0 = exact orthogonalization; >1 over-abliterates "
+                        "(alias: --scale)")
     p.add_argument("--adapter-dtype", choices=["auto", "float32", "bfloat16",
                                                "float16"], default="auto")
     p.add_argument("--shared-direction", type=int, default=None,
