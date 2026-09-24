@@ -73,6 +73,13 @@ both sides share (BF16 before FP8), and quantize after converting. Adapter
 factors default to float32; bfloat16 halves the size but can miss small
 tolerances.
 
+The adapter is precision-portable: compute it once from a matching-precision
+pair (e.g. FP8 abliteration vs FP8 base), then serve the same adapter over
+any quantization of the same base -- FP8, NVFP4, ... -- via --enable-lora;
+the LoRA factors stay high-precision on top of the quantized base. If your
+vLLM build rejects LoRA on a given quant (LoRA-over-NVFP4 is young), fall
+back to bake.
+
 ## Quickstart (GLM-5.3-Flash)
 
     # transient: fetch the published abliteration at the same precision as the base
