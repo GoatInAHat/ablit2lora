@@ -7,4 +7,4 @@ MB-scale PEFT LoRA adapter -- one base model copy on disk, hot-swappable in
 vLLM via --enable-lora. ablit2lora never finds refusal directions itself.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

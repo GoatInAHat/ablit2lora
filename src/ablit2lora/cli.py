@@ -11,12 +11,13 @@ from . import __version__, bake, convert, serve
 from . import eval as eval_mod
 
 PRECISION_NOTE = (
-    "Precision: the per-tensor diff runs in float32 on top of each side's "
-    "storage dtype. Compare checkpoints at matching precision (BF16 vs BF16, "
-    "FP8 vs FP8): quantized-vs-quantized or mixed-precision diffs carry "
-    "quantization noise, which surfaces as flagged tensors instead of a clean "
-    "low-rank edit. Diff at the highest precision both sides share; quantize "
-    "after converting."
+    "Precision: the per-tensor diff runs in float32. BF16 pairs diff on "
+    "their stored weights; FP8 pairs (float8_e4m3fn + block scales) are "
+    "dequantized first, and the FP8 grid re-rounding on changed blocks "
+    "surfaces as elevated residuals/flags -- that is the measurement, "
+    "recorded in manifest.json. NVFP4 is out of scope for convert (FP4 "
+    "grid noise dominates the diff; use the BF16 pair). Diff at the "
+    "highest precision both sides share; quantize after converting."
 )
 
 
@@ -76,10 +77,37 @@ def _add_convert(sub):
 
 def _add_serve(sub):
     p = sub.add_parser(
-        "serve", help="print the vLLM base+adapter command + compat notes"
+        "serve",
+        help="emit the serving config: two plain models by default, "
+             "base+adapter LoRA behind --enable-lora",
+        description=(
+            "Default: two-model config -- base and a full (baked) "
+            "abliterated checkpoint served as two plain models on the same "
+            "engine, ports P and P+1. No LoRA hot-mount: engines whose "
+            "model class lacks SupportsLoRA (verified: glm5_next / "
+            "GLM-5.3-Flash) cannot hot-mount adapters, so the edit ships "
+            "via 'ablit2lora bake' as a full checkpoint. "
+            "--adapter requires --enable-lora and emits the legacy "
+            "hot-mount command with a warning."
+        ),
     )
-    p.add_argument("--base", required=True)
-    p.add_argument("--adapter", required=True)
+    p.add_argument("--base", required=True, help="HF id or local path of the base model")
+    p.add_argument(
+        "--abliterated",
+        default=None,
+        help="full/baked abliterated checkpoint dir (two-model default path)",
+    )
+    p.add_argument(
+        "--adapter",
+        default=None,
+        help="adapter dir from convert (legacy; requires --enable-lora)",
+    )
+    p.add_argument(
+        "--enable-lora",
+        action="store_true",
+        help="emit the base+adapter hot-mount command (warned: glm5_next "
+             "does not implement SupportsLoRA; kept for engines that do)",
+    )
     p.add_argument("--name", default="abliterated", help="LoRA module name")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)
@@ -114,11 +142,27 @@ def _add_eval(sub):
 def _add_bake(sub):
     p = sub.add_parser(
         "bake",
-        help="optional fused export for pipelines that cannot use adapters",
+        help="fuse the adapter into a full serving checkpoint (the "
+             "deployment path when the engine cannot hot-mount LoRA)",
+        description=(
+            "Fuse W <- W + B @ A shard by shard into a full checkpoint at "
+            "the base precision. On an FP8 block-scale base, edited tensors "
+            "are requantized with fresh block scales by default "
+            "(--output-dtype auto); --output-dtype bfloat16 writes a plain "
+            "BF16 checkpoint instead (no re-rounding, ~2x disk)."
+        ),
     )
     p.add_argument("--adapter", required=True, help="adapter directory from convert")
     p.add_argument("--model", required=True, help="HF id or local path of the base")
     p.add_argument("--output", required=True, help="output model directory")
+    p.add_argument(
+        "--output-dtype",
+        choices=["auto", "bfloat16"],
+        default="auto",
+        help="auto: keep the base precision (FP8 base -> requantized FP8); "
+             "bfloat16: dequantize everything to a plain BF16 checkpoint "
+             "(accuracy-preserving, ~2x disk)",
+    )
     p.set_defaults(func=bake.run)
 
 

@@ -1,30 +1,100 @@
-"""Optional fused export for pipelines that cannot carry a LoRA at serve time.
+"""Fused export: bake the adapter into a full serving checkpoint.
 
 Prefer 'ablit2lora serve' (base + adapter, one copy, hot swap). bake is the
-escape hatch for runtimes that cannot use adapters (some quantized/edge
-stacks): it fuses W <- W + B @ A shard by shard -- one shard's tensors in
-RAM at a time -- preserving the base's shard layout and configs.
-Steady-state disk keeps a single serving copy (peak = base + fused during
-the pass; verify, then delete the source and adapter).
-"""
+escape hatch for engines whose model class cannot hot-mount a LoRA
+(glm5_next does not implement SupportsLoRA) and for runtimes that cannot
+use adapters at all: it fuses W <- W + B @ A shard by shard -- one shard's
+tensors in RAM at a time -- preserving the base's shard layout and configs.
 
+Precision handling:
+
+- BF16 base: the fused weights are written back in the base dtype (exact
+  LoRA merge, like PEFT merge_and_unload).
+- FP8 base (GLM/DeepSeek-style float8_e4m3fn + block scales):
+  * default (auto): edited tensors are dequantized, fused, and REQUANTIZED
+    with fresh block scales (absmax/448); untouched tensors keep their
+    original bytes. The output stays a valid FP8 checkpoint for the same
+    serving stack, but the edited blocks carry FP8 re-rounding noise.
+  * --output-dtype bfloat16: every tensor is dequantized to BF16, the
+    delta is fused exactly, all block-scale tensors are dropped, and
+    config.json loses its quantization_config. The accuracy-preserving
+    path: no re-rounding at all, at ~2x the disk footprint.
+"""
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from pathlib import Path
 
+import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 from .adapter import read_adapter
+from .quant import (
+    DEFAULT_BLOCK,
+    block_size_for,
+    dequant_blockwise,
+    dtype_family,
+    find_scale_key,
+    requant_fused,
+)
 from .weights import LazyWeights
 
 log = logging.getLogger(__name__)
 
+_FUSE_SUFFIX = ".weight"
+_SCALE_SUFFIXES = (".weight_scale_inv", ".weight_scale")
 
-def run(adapter: str, model: str, output: str) -> None:
+
+def _weight_of_scale(scale_key: str) -> str | None:
+    for suffix in _SCALE_SUFFIXES:
+        if scale_key.endswith(suffix):
+            return scale_key[: -len(suffix)] + _FUSE_SUFFIX
+    return None
+
+
+def _scale_for(
+    key: str, raw: dict[str, torch.Tensor], weights: LazyWeights
+) -> torch.Tensor:
+    """The block-scale tensor for a weight, from the shard or lazily."""
+    sk = find_scale_key(key, set(weights.keys()))
+    scale = raw.get(sk)
+    return scale if scale is not None else weights.get(sk)
+
+
+def _maybe_dequant(
+    t: torch.Tensor,
+    key: str,
+    raw: dict[str, torch.Tensor],
+    weights: LazyWeights,
+    fp8_keys: set[str],
+    names: set[str],
+    block,
+) -> torch.Tensor:
+    """Dequantize fp8 weights; pass everything else through untouched."""
+    if key not in fp8_keys:
+        return t
+    sk = find_scale_key(key, names)
+    scale = raw.get(sk)
+    if scale is None:
+        scale = weights.get(sk)
+    return dequant_blockwise(t, scale, block)
+
+
+def run(
+    adapter: str,
+    model: str,
+    output: str,
+    output_dtype: str = "auto",
+) -> None:
     """Fuse W <- W + B @ A into a new model directory, preserving layout."""
+    if output_dtype not in ("auto", "bfloat16"):
+        raise ValueError(
+            f"unknown --output-dtype {output_dtype!r} "
+            "(choose 'auto' or 'bfloat16')"
+        )
     entries, _cfg = read_adapter(adapter)
     if not entries:
         raise ValueError("adapter has no LoRA entries")
@@ -35,6 +105,22 @@ def run(adapter: str, model: str, output: str) -> None:
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"output dir {out} is not empty")
     out.mkdir(parents=True, exist_ok=True)
+
+    names = set(weights.keys())
+    fp8_keys = {
+        key
+        for key in names
+        if dtype_family(weights.tensors[key].dtype) == "fp8"
+        and find_scale_key(key, names) is not None
+    }
+    is_fp8 = bool(fp8_keys)
+    mode = (
+        "bfloat16_out"
+        if output_dtype == "bfloat16"
+        else ("fp8_requant" if is_fp8 else "bf16_merge")
+    )
+    block = block_size_for(src) if is_fp8 else DEFAULT_BLOCK
+    log.info("bake mode=%s block=%s fp8_weights=%d", mode, block, len(fp8_keys))
 
     for f in sorted(src.iterdir()):
         if f.is_file() and not f.name.endswith(".safetensors"):
@@ -47,23 +133,91 @@ def run(adapter: str, model: str, output: str) -> None:
 
     n_edited = 0
     for shard in shards:
-        block = {}
+        raw: dict[str, torch.Tensor] = {}
         with safe_open(shard, framework="pt", device="cpu") as f:
             for key in f.keys():
-                t = f.get_tensor(key)
-                module = key[: -len(".weight")] if key.endswith(".weight") else key
-                if key.endswith(".weight") and module in entries:
-                    A, B = entries[module]
-                    t = (t.float() + B.float() @ A.float()).to(t.dtype)
-                    n_edited += 1
-                block[key] = t
-        save_file(block, str(out / Path(shard).name), metadata={"format": "pt"})
+                raw[key] = f.get_tensor(key)
+
+        wrote: dict[str, torch.Tensor] = {}
+        # pass 1: untouched tensors (skip edited weights' scales; they are
+        # regenerated by pass 2 when their weight lives in this shard)
+        for key, t in raw.items():
+            module = key[: -len(_FUSE_SUFFIX)] if key.endswith(_FUSE_SUFFIX) else None
+            if module is not None and module in entries:
+                continue
+            sk = _weight_of_scale(key)
+            if sk is not None and sk in raw and sk[: -len(_FUSE_SUFFIX)] in entries:
+                continue
+            if mode == "bfloat16_out":
+                if key in fp8_keys:
+                    wrote[key] = _maybe_dequant(
+                        t, key, raw, weights, fp8_keys, names, block
+                    ).to(torch.bfloat16)
+                elif key.endswith(_SCALE_SUFFIXES):
+                    continue  # block scales are meaningless in a BF16 export
+                elif t.is_floating_point():
+                    wrote[key] = t.to(torch.bfloat16)
+                else:
+                    wrote[key] = t
+            else:
+                wrote[key] = t  # original bytes, FP8 grid included
+
+        # pass 2: edited weights (+ fresh scales on the FP8 round trip)
+        for key, t in raw.items():
+            module = key[: -len(_FUSE_SUFFIX)] if key.endswith(_FUSE_SUFFIX) else None
+            if module is None or module not in entries:
+                continue
+            A, B = entries[module]
+            if key in fp8_keys and mode != "bfloat16_out":
+                # dequant + fuse + requant with fresh block scales
+                q, s = requant_fused(
+                    t, _scale_for(key, raw, weights), B.float() @ A.float(), block
+                )
+                wrote[key] = q
+                wrote[find_scale_key(key, names)] = s
+            else:
+                base = _maybe_dequant(t, key, raw, weights, fp8_keys, names, block)
+                fused = base.float() + B.float() @ A.float()
+                wrote[key] = fused.to(
+                    torch.bfloat16 if mode == "bfloat16_out" else base.dtype
+                )
+            n_edited += 1
+
+        save_file(wrote, str(out / Path(shard).name), metadata={"format": "pt"})
         log.info("wrote %s", out / Path(shard).name)
 
     idx = src / "model.safetensors.index.json"
     if idx.exists():
         shutil.copy2(idx, out / idx.name)
-    print(f"baked {n_edited} module weights -> {out}")
+
+    cfg_path = src / "config.json"
+    if cfg_path.exists() and mode == "bfloat16_out":
+        cfg = json.loads(cfg_path.read_text())
+        cfg.pop("quantization_config", None)
+        for dtype_key in ("dtype", "torch_dtype"):
+            if dtype_key in cfg:
+                cfg[dtype_key] = "bfloat16"
+        tc = cfg.get("text_config")
+        if isinstance(tc, dict):
+            for dtype_key in ("dtype", "torch_dtype"):
+                if dtype_key in tc:
+                    tc[dtype_key] = "bfloat16"
+        (out / "config.json").write_text(json.dumps(cfg, indent=2))
+        log.info("rewrote config.json: quantization_config removed, dtype=bfloat16")
+
+    print(f"baked {n_edited} module weights -> {out} (mode: {mode}, block: {block})")
+    if mode == "fp8_requant":
+        print(
+            "  FP8 round trip: edited tensors requantized with fresh "
+            f"{block[0]}x{block[1]} block scales; unedited tensors keep their "
+            "original bytes. Use --output-dtype bfloat16 for the "
+            "re-round-free path."
+        )
+    if mode == "bfloat16_out":
+        print(
+            "  BF16 output: block scales dropped, quantization_config removed; "
+            "~2x disk vs FP8, no re-rounding on the fused weights."
+        )
     print(
         "peak disk during bake = base + fused; after verifying the output, "
         "delete the source copy and adapter to keep a single serving copy."

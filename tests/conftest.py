@@ -15,6 +15,10 @@ from safetensors.torch import save_file
 
 VOCAB_WORDS = [f"tok{i}" for i in range(120)]
 
+# small block size so synthetic tests stay tiny; the dequant/quant math is
+# block-size-agnostic and the real GLM-5.3-Flash format is 128x128
+FP8_BLOCK = 16
+
 
 def base_tensors(seed: int = 0) -> dict[str, torch.Tensor]:
     g = torch.Generator().manual_seed(seed)
@@ -35,10 +39,60 @@ def write_checkpoint(d: Path, tensors: dict[str, torch.Tensor]) -> Path:
         str(d / "model.safetensors"),
         metadata={"format": "pt"},
     )
-    (d / "config.json").write_text(
-        json.dumps({"num_hidden_layers": 4, "hidden_size": 32})
+    cfg: dict = {"num_hidden_layers": 4, "hidden_size": 32}
+    has_fp8 = any(
+        k.endswith(".weight") and "float8" in str(v.dtype).lower()
+        for k, v in tensors.items()
     )
+    if has_fp8:
+        # tiny synthetic blocks; the real GLM-5.3-Flash format is 128x128
+        cfg["quantization_config"] = {
+            "weight_block_size": [FP8_BLOCK, FP8_BLOCK]
+        }
+    (d / "config.json").write_text(json.dumps(cfg))
     return d
+
+
+def fp8_quantize_weight(w: torch.Tensor, block: int = FP8_BLOCK):
+    """Quantize one float weight to (float8_e4m3fn, bf16 block scales)."""
+    from ablit2lora.quant import quantize_blockwise
+
+    return quantize_blockwise(
+        w,
+        (block, block),
+        out_dtype=torch.float8_e4m3fn,
+        scale_dtype=torch.bfloat16,
+    )
+
+
+def ref_dequant(w_fp8: torch.Tensor, scale: torch.Tensor, block: int = FP8_BLOCK):
+    """Independent loop-based reference dequant (cross-check for quant.py)."""
+    out_f, in_f = w_fp8.shape
+    nb_r = (out_f + block - 1) // block
+    nb_c = (in_f + block - 1) // block
+    ref = torch.zeros(out_f, in_f, dtype=torch.float64)
+    for bi in range(nb_r):
+        for bj in range(nb_c):
+            s = float(scale[bi, bj].float())
+            rows = slice(bi * block, (bi + 1) * block)
+            cols = slice(bj * block, (bj + 1) * block)
+            ref[rows, cols] = w_fp8[rows, cols].float().double() * s
+    return ref
+
+
+def make_fp8_checkpoint(
+    d: Path, base_tensors: dict[str, torch.Tensor], block: int = FP8_BLOCK
+) -> Path:
+    """Store 2-D weights as fp8 + block scales; keep other tensors as-is."""
+    stored: dict[str, torch.Tensor] = {}
+    for key, t in base_tensors.items():
+        if key.endswith(".weight") and t.ndim == 2 and t.is_floating_point():
+            q, s = fp8_quantize_weight(t, block)
+            stored[key] = q
+            stored[key[: -len(".weight")] + ".weight_scale_inv"] = s
+        else:
+            stored[key] = t
+    return write_checkpoint(d, stored)
 
 
 def make_pair(base_root: Path, ablit_root: Path, edit) -> SimpleNamespace:
@@ -86,6 +140,24 @@ def mixed_pair(tmp_path_factory):
         tmp_path_factory.mktemp("pair-ablit"),
         edit,
     )
+
+
+@pytest.fixture()
+def fp8_pair_factory(tmp_path):
+    """(base, abliterated) pair stored as FP8 block-scale checkpoints."""
+
+    def make(edit):
+        base = base_tensors()
+        ablit = {k: v.clone() for k, v in base.items()}
+        edit(ablit, base)
+        return SimpleNamespace(
+            base_dir=make_fp8_checkpoint(tmp_path / "fp8-base", base),
+            ablit_dir=make_fp8_checkpoint(tmp_path / "fp8-ablit", ablit),
+            base=base,
+            ablit=ablit,
+        )
+
+    return make
 
 
 @pytest.fixture(scope="session")
