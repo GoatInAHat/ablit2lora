@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 import torch
@@ -35,6 +36,16 @@ def _convert(pair, tmp_path, **kw):
 
 def _rec(manifest, name):
     return {r["name"]: r for r in manifest["tensors"]}[name]
+
+
+def test_fit_rank_residual_energy_does_not_overflow_float32():
+    delta = torch.diag(torch.tensor([3e20, 2e20, 1e20], dtype=torch.float32))
+    rank, residual, a, b = convert.fit_rank(delta, tol=0.61, max_rank=3)
+
+    assert rank == 1
+    assert math.isfinite(residual)
+    assert residual == pytest.approx(math.sqrt(5 / 14), rel=1e-6)
+    assert torch.isfinite(a).all() and torch.isfinite(b).all()
 
 
 def test_exact_rank1(pair_factory, tmp_path):

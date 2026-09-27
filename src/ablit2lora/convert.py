@@ -66,14 +66,24 @@ def fit_rank(
     the optimal rank-k approximation.
     """
     d = delta.detach().to(device=device, dtype=torch.float32)
-    total = float(d.norm())
-    if total == 0.0:
+    if not torch.isfinite(d).all():
+        raise ValueError("fit_rank requires a finite delta")
+    if not 0 < tol < 1 or not torch.isfinite(torch.tensor(tol)):
+        raise ValueError("tol must be finite and between 0 and 1")
+    if max_rank < 1:
+        raise ValueError("max_rank must be >= 1")
+    if not torch.count_nonzero(d):
         raise ValueError("fit_rank called on a zero delta")
     U, S, Vh = torch.linalg.svd(d, full_matrices=False)
-    tail_sq = torch.cumsum((S * S).flip(0), 0).flip(0)  # tail_sq[k] = sum_{i>=k} s_i^2
+    # Singular vectors/factors remain float32, but residual energy is reduced in
+    # float64. Squaring large finite float32 singular values in float32 can
+    # overflow and turn rank selection into inf/inf -> NaN.
+    singular_sq = S.to(torch.float64).square()
+    total_sq = singular_sq.sum()
+    tail_sq = torch.cumsum(singular_sq.flip(0), 0).flip(0)
 
     def rel(k: int) -> float:
-        return float(torch.sqrt(tail_sq[k])) / total if k < tail_sq.numel() else 0.0
+        return float(torch.sqrt(tail_sq[k] / total_sq)) if k < tail_sq.numel() else 0.0
 
     chosen = max_rank
     for cand in range(1, max_rank + 1):
@@ -351,8 +361,10 @@ def run(
     manifest["deployment_note"] = (
         "when the engine's model class does not implement SupportsLoRA "
         "(e.g. glm5_next), hot-mounted LoRA is unavailable: bake the adapter "
-        "into a full checkpoint (ablit2lora bake) and serve it as a second "
-        "plain model (ablit2lora serve --abliterated ...)."
+        "into a full checkpoint (ablit2lora bake) and use the explicit "
+        "two-engine fallback (ablit2lora serve --abliterated ...) if resources "
+        "permit. The separate shared-weight runtime consumes validated writer "
+        "directions, not this PEFT adapter."
     )
     if dtype_mismatch:
         log.warning(

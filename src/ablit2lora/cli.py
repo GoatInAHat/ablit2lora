@@ -78,40 +78,76 @@ def _add_convert(sub):
 def _add_serve(sub):
     p = sub.add_parser(
         "serve",
-        help="emit the serving config: two plain models by default, "
-             "base+adapter LoRA behind --enable-lora",
+        help="emit a shared-weight runtime, LoRA, or two-engine fallback config",
         description=(
-            "Default: two-model config -- base and a full (baked) "
-            "abliterated checkpoint served as two plain models on the same "
-            "engine, ports P and P+1. No LoRA hot-mount: engines whose "
-            "model class lacks SupportsLoRA (verified: glm5_next / "
-            "GLM-5.3-Flash) cannot hot-mount adapters, so the edit ships "
-            "via 'ablit2lora bake' as a full checkpoint. "
-            "--adapter requires --enable-lora and emits the legacy "
-            "hot-mount command with a warning."
+            "Preferred shared-weight mode: pass a direction artifact to a "
+            "compatible separately installed vLLM general plugin; one engine "
+            "advertises both stock and abliterated names. PEFT LoRA remains "
+            "available on architectures with SupportsLoRA. A baked checkpoint "
+            "fallback starts two independent engines and two full model "
+            "allocations."
         ),
     )
     p.add_argument("--base", required=True, help="HF id or local path of the base model")
-    p.add_argument(
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--directions",
+        default=None,
+        help="writer-projection direction artifact for a compatible runtime plugin",
+    )
+    mode.add_argument(
         "--abliterated",
         default=None,
-        help="full/baked abliterated checkpoint dir (two-model default path)",
+        help="full/baked checkpoint dir (two independent engine fallback)",
     )
-    p.add_argument(
+    mode.add_argument(
         "--adapter",
         default=None,
-        help="adapter dir from convert (legacy; requires --enable-lora)",
+        help="PEFT adapter dir from convert (requires --enable-lora)",
+    )
+    p.add_argument(
+        "--directions-manifest",
+        default=None,
+        help="direction provenance manifest (default: replace artifact suffix with "
+             ".manifest.json)",
+    )
+    p.add_argument(
+        "--serving-profile",
+        default="glm53-experimental-approx-output-v1",
+        help="runtime plugin's explicit artifact/profile contract",
+    )
+    p.add_argument(
+        "--serving-proof",
+        default=None,
+        help="independent proof JSON required by the shared-weight runtime profile",
+    )
+    p.add_argument(
+        "--plugin-path",
+        default=None,
+        help="optional directory containing an installed compatible plugin; prepended "
+             "to PYTHONPATH",
+    )
+    p.add_argument(
+        "--stock-name",
+        default=None,
+        help="served model name for untouched requests in shared-weight mode "
+             "(default: glm-5.3-flash)",
     )
     p.add_argument(
         "--enable-lora",
         action="store_true",
-        help="emit the base+adapter hot-mount command (warned: glm5_next "
-             "does not implement SupportsLoRA; kept for engines that do)",
+        help="emit the base+adapter hot-mount command (requires --adapter; "
+             "glm5_next does not implement SupportsLoRA)",
     )
-    p.add_argument("--name", default="abliterated", help="LoRA module name")
+    p.add_argument(
+        "--name",
+        default=None,
+        help="abliterated served alias (default: glm-5.3-flash-abliterated in "
+             "shared-weight mode; abliterated in LoRA mode)",
+    )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--extra", default=None, help="extra vLLM flags, appended verbatim")
+    p.add_argument("--extra", default=None, help="extra vLLM flags, parsed as shell words")
     p.add_argument("--script", default=None, help="also write an executable script")
     p.set_defaults(func=serve.run)
 
@@ -171,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="ablit2lora",
         description=(
             "Pure converter: turn published abliterated checkpoints into "
-            "MB-scale LoRA adapters -- one base copy, hot-swappable in vLLM. "
+            "MB-scale LoRA adapters, and emit explicit vLLM serving recipes. "
             "ablit2lora does not find refusal directions; the abliteration "
             "labs (audnai/penclaw, orcarouter, dealignai, huihui-ai, ...) "
             "make the checkpoints it converts."

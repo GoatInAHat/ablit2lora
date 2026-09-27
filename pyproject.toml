@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ablit2lora"
-version = "0.2.0"
-description = "Convert published abliterated checkpoints into MB-scale PEFT LoRA adapters: one base copy, hot-swappable in vLLM."
+version = "0.3.1"
+description = "Convert abliterated checkpoints to PEFT adapters and emit accurate shared-weight vLLM runtime recipes."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

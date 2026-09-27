@@ -1,13 +1,16 @@
 # ablit2lora
 
-**Pure converter**: turn a *published* abliterated checkpoint into a
-MB-scale LoRA adapter -- keep one base copy, hot-swap the edit in vLLM.
+Convert a *published* abliterated checkpoint into a MB-scale PEFT adapter,
+and emit accurate vLLM launch recipes for PEFT or a separately installed
+request-local shared-weight runtime.
 
 ablit2lora does **not** find refusal directions and does not compete with
 the abliteration labs. They do the science -- contrastive direction search,
 orthogonalization, retraining -- and publish full modified checkpoints.
-This tool converts those artifacts into PEFT LoRA adapters so you never
-keep a second full copy of the weights:
+This tool converts those artifacts into PEFT LoRA adapters. Where an engine
+architecture cannot hot-mount PEFT, `ablit2lora serve --directions` can wire
+an already installed compatible writer-projection plugin into one loaded
+base engine:
 
         published abliteration        ablit2lora convert        adapter (~MB)
         (full checkpoint,     ────►   diff + SVD rank    ────►  + manifest.json
@@ -23,17 +26,22 @@ keep a second full copy of the weights:
 abliteration copy*, keep base + adapter. Disk: one base + MBs, not one
 full checkpoint per variant.
 
-**Deployment reality check (v0.3).** Hot-mounted LoRA requires the serving
+**Deployment reality check (v0.3.1).** Hot-mounted LoRA requires the serving
 engine's model class to implement `SupportsLoRA`. The vLLM `glm5_next`
 class (GLM-5.3-Flash) does **not** — no `packed_modules_mapping`, no LoRA
-plumbing — so on the stock engine the adapter cannot be hot-mounted. The
-supported deployment path is therefore:
+plumbing — so on the stock engine the adapter cannot be hot-mounted.
 
-    convert (verify + compact artifact) ──► bake into a full checkpoint ──►
-    serve as a SECOND PLAIN MODEL next to the base (same engine, no
-    --enable-lora). 'ablit2lora serve' emits that two-model config by
-    default; the old --enable-lora command stays behind a flag with a
-    warning.
+The shared-resource path is one base engine plus a compatible vLLM general
+plugin that applies a request-local projection to selected writer outputs.
+`serve --directions` emits its environment and advertises stock first plus an
+abliterated alias in one `--served-model-name` list. The runtime plugin,
+direction artifact, manifest, and independent proof are separate inputs;
+ablit2lora neither generates nor silently installs them and does not claim an
+approximate direction profile is exact checkpoint equality.
+
+The baked fallback starts **two independent engines and two full model
+allocations**. It is intentionally not described as shared weights and may
+not fit on hardware sized for one model.
 
 First-class target: **GLM-5.3-Flash** (arch glm5_next, MoE) -- and any
 Llama/GLM/Qwen-style decoder, dense or MoE. convert and bake operate at
@@ -116,13 +124,16 @@ back to bake.
       --abliterated <lab>/GLM-5.3-Flash-abliterated \
       --tol 0.05 --max-rank 8 \
       --out adapter-glm53flash-ablit
-    # glm5_next cannot hot-mount LoRA: bake the edit into a full checkpoint
-    ablit2lora bake --adapter adapter-glm53flash-ablit \
-      --model zai-org/GLM-5.3-Flash \
-      --output glm53flash-ablit-fused
-    # serve base + baked abliterated as two plain models (default):
+    # glm5_next cannot hot-mount LoRA. With a separately validated compatible
+    # request-local runtime and its artifacts, emit a one-engine launch:
     ablit2lora serve --base zai-org/GLM-5.3-Flash \
-      --abliterated glm53flash-ablit-fused --script serve.sh
+      --directions <directions.safetensors> \
+      --directions-manifest <directions.manifest.json> \
+      --serving-profile glm53-experimental-approx-output-v1 \
+      --serving-proof <independent-summary.json> \
+      --plugin-path <installed-runtime-plugin-dir> \
+      --stock-name glm-5.3-flash --name glm-5.3-flash-abliterated \
+      --script serve.sh
     # verify fidelity: base+adapter should match the abliterated reference's
     # refusal behavior while perplexity stays near the plain base
     ablit2lora eval --base zai-org/GLM-5.3-Flash \
@@ -138,11 +149,11 @@ safety evaluation) and perplexity over benign text, for the plain base,
 base+adapter, and optionally the abliterated reference checkpoint. vLLM
 backend preferred; transformers fallback.
 
-## bake (the deployment path)
+## bake (full-checkpoint fallback)
 
-Fuse W <- W + B @ A into a full checkpoint. This is the supported path for
-engines that cannot hot-mount LoRA (glm5_next lacks SupportsLoRA) and for
-quantized/edge runtimes:
+Fuse W <- W + B @ A into a full checkpoint. This remains useful for
+quantized/edge runtimes and for a two-engine fallback when neither PEFT nor a
+compatible request-local runtime is available:
 
     ablit2lora bake --adapter adapter-glm53flash-ablit --model <base> \
       --output glm53flash-ablit-fused [--output-dtype bfloat16]
@@ -166,10 +177,33 @@ delete the source copy and adapter.
 
 ## Serving
 
-Default ('ablit2lora serve --base <base> --abliterated <baked-model-dir>')
-emits two plain `vllm serve` commands -- base on port P, the baked
-abliterated checkpoint on P+1, same engine, no `--enable-lora`. Pick the
-behavior per request by pointing the client at the model/port.
+Preferred shared-weight integration (one engine, one loaded base):
+
+    ablit2lora serve --base <base> \
+      --directions <directions.safetensors> \
+      --serving-proof <independent-summary.json> \
+      --plugin-path <installed-runtime-plugin-dir> \
+      --stock-name <stock-name> --name <abliterated-alias>
+
+This emits `ABL_SERVING_PROFILE`, `ABL_SERVING_PROOF`, `ABL_DIRS`,
+`ABL_DIRS_MANIFEST`, `ABL_ALIAS`, optional `PYTHONPATH`, and one `vllm serve`
+command with both served names. It deliberately does not set `VLLM_PLUGINS`,
+because that variable is an allowlist and could suppress other discovered
+plugins.
+
+Runtime profiles can be specific to a captured engine build and checkpoint;
+the CLI is a recipe generator, not a runtime compatibility validator. The
+default GLM profile requires the alias `glm-5.3-flash-abliterated` (optionally
+with a lowercase alphanumeric/hyphen suffix), and its runtime verifies exact
+artifact, proof, engine, and model-path bindings. Use another profile only
+with a runtime that implements it.
+
+The baked fallback is explicit and resource-heavy:
+
+    ablit2lora serve --base <base> --abliterated <baked-model-dir>
+
+It emits two independent `vllm serve` commands -- base on port P and the
+baked checkpoint on P+1 -- and loads two full model allocations.
 
 The legacy hot-mount command stays behind a flag with a warning (glm5_next
 does not implement SupportsLoRA; kept for engines that do):
@@ -214,7 +248,8 @@ the same base -- vs a full re-release per variant.
 ## Limitations
 
 - **glm5_next cannot hot-mount LoRA** (no SupportsLoRA in the stock vLLM
-  engine class): use bake + the two-model serve config on GLM-5.3-Flash.
+  engine class): use an independently validated compatible request-local
+  runtime, or bake + the two-engine fallback if resources permit.
 - **NVFP4 is out of scope for convert** (FP4 grid noise dominates a
   checkpoint-vs-checkpoint diff); convert the BF16 pair and bake instead.
 - **FP8-pair diffs carry quant-grid noise** (~2-3% RMS): use a looser
