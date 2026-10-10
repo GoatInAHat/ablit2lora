@@ -282,3 +282,16 @@ never approximated; and a PEFT merge of the converted adapter reproduces
 the abliterated weights.
 
 MIT license. Python >= 3.10.
+
+### Optimized GLM EXL3 profile
+
+The `glm53-exl3-approx-output-v1` profile additionally requires
+`--exl3-writer-proof /absolute/path/writer-provenance.json` and the separately
+installed `glm53-ablation-plugin` 0.4.1 runtime. It emits `ABL_EXL3_WRITER_PROOF`;
+the runtime verifies the pinned EXL3 checkpoint, all 56 BF16 source writers,
+engine source, DFlash2 path and dense-FP8 policy. Preserve the deployment's
+existing optimized launch flags; this command generator does not replace them.
+This is request-local activation projection over one shared EXL3 base, not an
+EXL3 converter, native PEFT, or exact reconstruction of an abliterated checkpoint.
+Both mode namespaces retain client cache-salt isolation. Actual GPU/mechanical
+and behavioral validation belongs to the runtime deployment, not this generator.

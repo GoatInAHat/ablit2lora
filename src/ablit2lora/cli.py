@@ -122,6 +122,11 @@ def _add_serve(sub):
         help="independent proof JSON required by the shared-weight runtime profile",
     )
     p.add_argument(
+        "--exl3-writer-proof",
+        default=None,
+        help="byte-correspondence proof required by glm53-exl3-approx-output-v1",
+    )
+    p.add_argument(
         "--plugin-path",
         default=None,
         help="optional directory containing an installed compatible plugin; prepended "
