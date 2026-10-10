@@ -86,6 +86,7 @@ def build_shared_weight_command(
     directions_manifest: str | None = None,
     serving_profile: str = "glm53-experimental-approx-output-v1",
     serving_proof: str | None = None,
+    exl3_writer_proof: str | None = None,
     plugin_path: str | None = None,
     stock_name: str = "glm-5.3-flash",
     name: str = "glm-5.3-flash-abliterated",
@@ -100,7 +101,8 @@ def build_shared_weight_command(
         raise ValueError("--stock-name and --name must differ")
     if not serving_profile:
         raise ValueError("--serving-profile must be non-empty")
-    if serving_profile == "glm53-experimental-approx-output-v1" and not re.fullmatch(
+    glm_profiles = ("glm53-experimental-approx-output-v1", "glm53-exl3-approx-output-v1")
+    if serving_profile in glm_profiles and not re.fullmatch(
         r"glm-5\.3-flash-abliterated(?:-[a-z0-9-]{1,32})?", name
     ):
         raise ValueError(
@@ -109,6 +111,11 @@ def build_shared_weight_command(
         )
     if not serving_proof:
         raise ValueError("--serving-proof is required in shared-weight mode")
+
+    if serving_profile == "glm53-exl3-approx-output-v1" and not exl3_writer_proof:
+        raise ValueError("--exl3-writer-proof is required by the EXL3 profile")
+    if exl3_writer_proof and serving_profile != "glm53-exl3-approx-output-v1":
+        raise ValueError("--exl3-writer-proof requires the EXL3 serving profile")
 
     directions_path = Path(directions).expanduser().resolve()
     if not directions_path.is_file():
@@ -146,6 +153,11 @@ def build_shared_weight_command(
             _export("ABL_ALIAS", name),
         )
     )
+    if exl3_writer_proof:
+        writer_proof_path = Path(exl3_writer_proof).expanduser().resolve()
+        if not writer_proof_path.is_file():
+            raise FileNotFoundError(f"EXL3 writer proof not found: {writer_proof_path}")
+        exports.append(_export("ABL_EXL3_WRITER_PROOF", str(writer_proof_path)))
     command = _command(
         [
             "vllm",
@@ -256,6 +268,7 @@ def run(
     directions_manifest: str | None = None,
     serving_profile: str = "glm53-experimental-approx-output-v1",
     serving_proof: str | None = None,
+    exl3_writer_proof: str | None = None,
     plugin_path: str | None = None,
     stock_name: str | None = None,
     abliterated: str | None = None,
@@ -277,6 +290,8 @@ def run(
         raise ValueError("--adapter requires --enable-lora")
     if directions is None and (directions_manifest is not None or plugin_path is not None):
         raise ValueError("--directions-manifest and --plugin-path require --directions")
+    if directions is None and exl3_writer_proof is not None:
+        raise ValueError("--exl3-writer-proof requires --directions")
     if directions is None and serving_proof is not None:
         raise ValueError("--serving-proof requires --directions")
 
@@ -287,6 +302,7 @@ def run(
             directions_manifest=directions_manifest,
             serving_profile=serving_profile,
             serving_proof=serving_proof,
+            exl3_writer_proof=exl3_writer_proof,
             plugin_path=plugin_path,
             stock_name=stock_name or "glm-5.3-flash",
             name=name or "glm-5.3-flash-abliterated",

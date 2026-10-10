@@ -243,3 +243,34 @@ def test_identical_checkpoints_no_adapter(tmp_path, mixed_pair):
     )
     assert r.returncode != 0
     assert (out / "manifest.json").exists()
+
+
+def test_exl3_profile_requires_writer_proof_and_emits_quoted_path(tmp_path):
+    from ablit2lora.serve import build_shared_weight_command
+
+    artifact = tmp_path / "directions.safetensors"
+    manifest = artifact.with_suffix(".manifest.json")
+    proof = tmp_path / "proof.json"
+    writer = tmp_path / "writer proof.json"
+    for path in (artifact, manifest, proof, writer):
+        path.write_text("{}")
+    kwargs = dict(serving_profile="glm53-exl3-approx-output-v1", serving_proof=str(proof))
+    with pytest.raises(ValueError, match="exl3-writer-proof"):
+        build_shared_weight_command("base", str(artifact), **kwargs)
+    command = build_shared_weight_command(
+        "base", str(artifact), exl3_writer_proof=str(writer), **kwargs
+    )
+    assert "export ABL_EXL3_WRITER_PROOF='" + str(writer) + "'" in command
+    assert command.count("vllm") == 1
+    assert "glm-5.3-flash-abliterated" in command
+
+    result = _run(
+        "serve", "--base", "base", "--directions", str(artifact),
+        "--serving-profile", "glm53-exl3-approx-output-v1",
+        "--serving-proof", str(proof), "--exl3-writer-proof", str(writer),
+        "--extra=--tensor-parallel-size 2 --max-model-len 262144",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "export ABL_EXL3_WRITER_PROOF='" + str(writer) + "'" in result.stdout
+    assert "--tensor-parallel-size 2" in _flat(result.stdout)
+    assert "--max-model-len 262144" in _flat(result.stdout)
