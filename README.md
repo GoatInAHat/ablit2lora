@@ -268,6 +268,6 @@ reproduces the abliterated weights; the emitted vLLM/SGLang multi-adapter
 commands carry the right flags (names, --max-loras, --max-lora-rank read
 from each adapter_config.json); and eval's perplexity matches an
 independent cross-entropy computation. CI (`.github/workflows/ci.yml`)
-runs ruff and pytest on push/PR against Python 3.11 and 3.12.
+runs ruff and pytest on push/PR against Python 3.10, 3.11, 3.12, and 3.13.
 
 MIT license. Python >= 3.10.
