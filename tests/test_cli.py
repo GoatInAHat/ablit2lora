@@ -99,7 +99,9 @@ def test_serve_two_engine_fallback(tmp_path, mixed_pair):
 
 def test_serve_adapter_requires_enable_lora(tmp_path, mixed_pair):
     _r, out = _convert_cli(tmp_path, mixed_pair)
-    r = _run("serve", "--base", str(mixed_pair.base_dir), "--adapter", str(out))
+    r = _run(
+        "serve", "--base", str(mixed_pair.base_dir), "--adapter", f"abliterated={out}"
+    )
     assert r.returncode != 0
     assert "--enable-lora" in r.stderr
 
@@ -108,12 +110,13 @@ def test_serve_enable_lora_warns(tmp_path, mixed_pair):
     _r, out = _convert_cli(tmp_path, mixed_pair)
     r = _run(
         "serve", "--base", str(mixed_pair.base_dir),
-        "--adapter", str(out), "--enable-lora",
+        "--adapter", f"abliterated={out}", "--enable-lora",
     )
     assert r.returncode == 0, r.stderr
     flat = _flat(r.stdout)
     assert "vllm serve" in flat
     assert "--lora-modules abliterated=" in flat
+    assert "--max-loras 1" in flat
     assert "--max-lora-rank 8" in flat
     assert "warning:" in flat and "SupportsLoRA" in flat
 

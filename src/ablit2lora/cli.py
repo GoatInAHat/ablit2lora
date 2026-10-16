@@ -78,20 +78,26 @@ def _add_convert(sub):
 def _add_serve(sub):
     p = sub.add_parser(
         "serve",
-        help="emit a PEFT LoRA hot-mount command, or a two-engine fallback",
+        help="emit a native multi-LoRA vLLM/SGLang command, or a two-engine fallback",
         description=(
-            "Standard mode: base + adapter --enable-lora (requires the engine's "
-            "model class to implement SupportsLoRA). A baked checkpoint "
-            "fallback starts two independent engines and two full model "
-            "allocations."
+            "Standard mode: one engine, one loaded base, one or more hot-mounted "
+            "PEFT adapters (the stock-equivalent, abliterated, and any other "
+            "variants for the same base), selected per request via the OpenAI "
+            "model field. Requires the engine's model class to implement "
+            "SupportsLoRA -- see 'Supported base families' in the README. A "
+            "baked checkpoint fallback starts two independent engines and two "
+            "full model allocations."
         ),
     )
     p.add_argument("--base", required=True, help="HF id or local path of the base model")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument(
         "--adapter",
+        action="append",
+        metavar="NAME=PATH",
         default=None,
-        help="PEFT adapter dir from convert (requires --enable-lora)",
+        help="PEFT adapter from convert, as name=path; repeat for multiple "
+             "adapters on one engine (requires --enable-lora)",
     )
     mode.add_argument(
         "--abliterated",
@@ -101,18 +107,32 @@ def _add_serve(sub):
     p.add_argument(
         "--enable-lora",
         action="store_true",
-        help="emit the base+adapter hot-mount command (requires --adapter; "
-             "see 'Supported base families' in the README for per-architecture "
-             "SupportsLoRA status)",
+        help="emit the base+adapter(s) hot-mount command (requires --adapter)",
     )
     p.add_argument(
-        "--name",
+        "--engine",
+        choices=["vllm", "sglang"],
+        default="vllm",
+        help="serving engine for the --adapter command (default: vllm)",
+    )
+    p.add_argument(
+        "--max-loras",
+        type=int,
         default=None,
-        help="abliterated served alias in LoRA mode (default: abliterated)",
+        help="override the adapter slot count (default: number of --adapter)",
+    )
+    p.add_argument(
+        "--max-lora-rank",
+        type=int,
+        default=None,
+        help="override the max LoRA rank (default: the largest r across "
+             "each adapter_config.json)",
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--extra", default=None, help="extra vLLM flags, parsed as shell words")
+    p.add_argument(
+        "--extra", default=None, help="extra engine flags, parsed as shell words"
+    )
     p.add_argument("--script", default=None, help="also write an executable script")
     p.set_defaults(func=serve.run)
 
