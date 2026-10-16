@@ -134,9 +134,10 @@ def _lora_serve_hint(base: str, adapter_dir: str, rank: int) -> str:
     """A ready-to-run vLLM hot-mount command for this adapter.
 
     A minimal, self-contained render: convert must not depend on the serving
-    CLI (ablit2lora.serve). See ablit2lora.serve.build_lora_command (or
+    CLI (ablit2lora.serve). See ablit2lora.serve.build_multi_lora_command (or
     `ablit2lora serve --adapter`) for the full-featured, independently
-    invocable command builder, including multi-adapter and SGLang variants.
+    invocable command builder, including multi-adapter and (via
+    build_sglang_multi_lora_command) SGLang variants.
     """
     adapter_path = Path(adapter_dir).resolve()
     return (

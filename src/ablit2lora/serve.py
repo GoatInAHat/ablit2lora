@@ -73,38 +73,6 @@ def _command(words: list[str], extra: str | None = None) -> str:
     return separator.join(shlex.quote(word) for word in words)
 
 
-def build_lora_command(
-    base: str,
-    adapter: str,
-    name: str = "abliterated",
-    host: str = "0.0.0.0",
-    port: int = 8000,
-    extra: str | None = None,
-) -> str:
-    adapter_path = Path(adapter).resolve()
-    cfg_file = adapter_path / "adapter_config.json"
-    if not cfg_file.exists():
-        raise FileNotFoundError(f"{cfg_file} not found")
-    rank = int(json.loads(cfg_file.read_text()).get("r", 1))
-    return _command(
-        [
-            "vllm",
-            "serve",
-            str(base),
-            "--enable-lora",
-            "--lora-modules",
-            f"{name}={adapter_path}",
-            "--max-lora-rank",
-            str(max(8, rank)),
-            "--host",
-            str(host),
-            "--port",
-            str(port),
-        ],
-        extra,
-    )
-
-
 AdapterSpec = tuple[str, Path]
 
 

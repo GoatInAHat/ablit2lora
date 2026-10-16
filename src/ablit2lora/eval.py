@@ -48,7 +48,8 @@ def _is_refusal(text: str) -> bool:
 
 
 def _lora_rank(adapter: str | None) -> int:
-    """vLLM's max_lora_rank for this adapter, like build_lora_command; 8 if absent."""
+    """vLLM's max_lora_rank for this adapter, like build_multi_lora_command/
+    build_sglang_multi_lora_command; 8 if absent."""
     if not adapter:
         return 8
     cfg_file = Path(adapter) / "adapter_config.json"
