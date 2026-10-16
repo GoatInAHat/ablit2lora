@@ -111,6 +111,29 @@ def _resolved_max_lora_rank(specs: list[AdapterSpec], max_lora_rank: int | None)
     return max(8, max(_adapter_rank(path) for _, path in specs))
 
 
+def _validate_multi_lora_limits(
+    specs: list[AdapterSpec], max_loras: int | None, max_lora_rank: int | None
+) -> None:
+    """Reject an explicit --max-loras/--max-lora-rank too small for ``specs``.
+
+    Without this, an under-sized explicit override would only surface as the
+    serving engine refusing to start once the emitted command is actually run.
+    """
+    if max_loras is not None and max_loras < len(specs):
+        raise ValueError(
+            f"--max-loras {max_loras} is less than the {len(specs)} adapter(s) "
+            "supplied"
+        )
+    if max_lora_rank is not None:
+        largest = max(_adapter_rank(path) for _, path in specs)
+        if max_lora_rank < largest:
+            raise ValueError(
+                f"--max-lora-rank {max_lora_rank} is less than the largest "
+                f"adapter rank ({largest}) found in the supplied "
+                "adapter_config.json files"
+            )
+
+
 def build_multi_lora_command(
     base: str,
     adapters: list[str] | list[tuple[str, str]],
@@ -129,6 +152,7 @@ def build_multi_lora_command(
     largest ``r`` across their ``adapter_config.json`` files.
     """
     specs = _parse_adapter_specs(adapters)
+    _validate_multi_lora_limits(specs, max_loras, max_lora_rank)
     rank = _resolved_max_lora_rank(specs, max_lora_rank)
     n = max_loras if max_loras is not None else len(specs)
     return _command(
@@ -207,6 +231,7 @@ def build_sglang_multi_lora_command(
     vLLM-specific one: identical ``name=path`` specs, SGLang's own flag names.
     """
     specs = _parse_adapter_specs(adapters)
+    _validate_multi_lora_limits(specs, max_loras, max_lora_rank)
     rank = _resolved_max_lora_rank(specs, max_lora_rank)
     n = max_loras if max_loras is not None else len(specs)
     return _command(

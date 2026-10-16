@@ -66,6 +66,15 @@ def test_build_multi_lora_command_rejects_duplicate_names_and_bad_specs(tmp_path
         serve.build_multi_lora_command("base", [])
 
 
+def test_build_multi_lora_command_rejects_undersized_overrides(tmp_path):
+    a = _adapter(tmp_path, "a", rank=4)
+    b = _adapter(tmp_path, "b", rank=16)
+    with pytest.raises(ValueError, match=r"--max-loras 1 is less than the 2"):
+        serve.build_multi_lora_command("base", [f"a={a}", f"b={b}"], max_loras=1)
+    with pytest.raises(ValueError, match=r"--max-lora-rank 8 is less than the largest"):
+        serve.build_multi_lora_command("base", [f"a={a}", f"b={b}"], max_lora_rank=8)
+
+
 def test_build_dynamic_lora_runbook_vllm():
     note = serve.build_dynamic_lora_runbook(
         host="0.0.0.0", port=8000, example_name="abliterated", example_path="/a/b"
@@ -92,6 +101,17 @@ def test_build_sglang_multi_lora_command(tmp_path):
     assert f"--lora-paths x={a} y={b}" in cmd
     assert "--max-loras-per-batch 2" in cmd
     assert "--max-lora-rank 32" in cmd
+
+
+def test_build_sglang_multi_lora_command_rejects_undersized_overrides(tmp_path):
+    a = _adapter(tmp_path, "a", rank=4)
+    b = _adapter(tmp_path, "b", rank=16)
+    with pytest.raises(ValueError, match=r"--max-loras 1 is less than the 2"):
+        serve.build_sglang_multi_lora_command("base", [f"a={a}", f"b={b}"], max_loras=1)
+    with pytest.raises(ValueError, match=r"--max-lora-rank 8 is less than the largest"):
+        serve.build_sglang_multi_lora_command(
+            "base", [f"a={a}", f"b={b}"], max_lora_rank=8
+        )
 
 
 def test_build_sglang_dynamic_lora_runbook_has_no_v1_prefix_and_colon_model_syntax():
