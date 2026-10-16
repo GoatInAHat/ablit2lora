@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ablit2lora"
 version = "0.3.1"
-description = "Convert abliterated checkpoints to PEFT adapters and emit accurate shared-weight vLLM runtime recipes."
+description = "Convert abliterated checkpoints to PEFT adapters and emit native multi-adapter vLLM/SGLang serving recipes."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -28,12 +28,12 @@ dependencies = [
     "transformers>=4.45,<5",
     "safetensors>=0.4.3",
     "huggingface_hub>=0.23",
+    "peft>=0.13,<1",
 ]
 
 [project.optional-dependencies]
-peft = ["peft>=0.13,<1"]
-test = ["pytest>=8", "peft>=0.13,<1"]
-dev = ["ruff>=0.6", "pytest>=8", "peft>=0.13,<1"]
+test = ["pytest>=8"]
+dev = ["ruff>=0.6", "pytest>=8"]
 
 [project.urls]
 Homepage = "https://github.com/GoatInAHat/ablit2lora"

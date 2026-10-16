@@ -30,7 +30,7 @@ from pathlib import Path
 import torch
 
 from . import __version__
-from .adapter import write_adapter
+from .adapter import write_adapter, write_model_card
 from .quant import block_size_for, dequant_blockwise, dtype_family, find_scale_key
 from .weights import LazyWeights
 
@@ -457,6 +457,7 @@ def run(
         rank=uniform_rank,
         dtype=_DTYPE_MAP[adapter_dtype],
     )
+    write_model_card(out_dir, base_model=base)
     adapter_bytes = (out_dir / "adapter_model.safetensors").stat().st_size
     cmd = _lora_serve_hint(base, str(out_dir), uniform_rank)
     manifest["adapter"] = {
