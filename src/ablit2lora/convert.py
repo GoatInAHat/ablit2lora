@@ -363,8 +363,7 @@ def run(
         "(e.g. glm5_next), hot-mounted LoRA is unavailable: bake the adapter "
         "into a full checkpoint (ablit2lora bake) and use the explicit "
         "two-engine fallback (ablit2lora serve --abliterated ...) if resources "
-        "permit. The separate shared-weight runtime consumes validated writer "
-        "directions, not this PEFT adapter."
+        "permit."
     )
     if dtype_mismatch:
         log.warning(

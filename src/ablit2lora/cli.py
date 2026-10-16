@@ -78,12 +78,10 @@ def _add_convert(sub):
 def _add_serve(sub):
     p = sub.add_parser(
         "serve",
-        help="emit a shared-weight runtime, LoRA, or two-engine fallback config",
+        help="emit a PEFT LoRA hot-mount command, or a two-engine fallback",
         description=(
-            "Preferred shared-weight mode: pass a direction artifact to a "
-            "compatible separately installed vLLM general plugin; one engine "
-            "advertises both stock and abliterated names. PEFT LoRA remains "
-            "available on architectures with SupportsLoRA. A baked checkpoint "
+            "Standard mode: base + adapter --enable-lora (requires the engine's "
+            "model class to implement SupportsLoRA). A baked checkpoint "
             "fallback starts two independent engines and two full model "
             "allocations."
         ),
@@ -91,64 +89,26 @@ def _add_serve(sub):
     p.add_argument("--base", required=True, help="HF id or local path of the base model")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument(
-        "--directions",
+        "--adapter",
         default=None,
-        help="writer-projection direction artifact for a compatible runtime plugin",
+        help="PEFT adapter dir from convert (requires --enable-lora)",
     )
     mode.add_argument(
         "--abliterated",
         default=None,
         help="full/baked checkpoint dir (two independent engine fallback)",
     )
-    mode.add_argument(
-        "--adapter",
-        default=None,
-        help="PEFT adapter dir from convert (requires --enable-lora)",
-    )
-    p.add_argument(
-        "--directions-manifest",
-        default=None,
-        help="direction provenance manifest (default: replace artifact suffix with "
-             ".manifest.json)",
-    )
-    p.add_argument(
-        "--serving-profile",
-        default="glm53-experimental-approx-output-v1",
-        help="runtime plugin's explicit artifact/profile contract",
-    )
-    p.add_argument(
-        "--serving-proof",
-        default=None,
-        help="independent proof JSON required by the shared-weight runtime profile",
-    )
-    p.add_argument(
-        "--exl3-writer-proof",
-        default=None,
-        help="byte-correspondence proof required by glm53-exl3-approx-output-v1",
-    )
-    p.add_argument(
-        "--plugin-path",
-        default=None,
-        help="optional directory containing an installed compatible plugin; prepended "
-             "to PYTHONPATH",
-    )
-    p.add_argument(
-        "--stock-name",
-        default=None,
-        help="served model name for untouched requests in shared-weight mode "
-             "(default: glm-5.3-flash)",
-    )
     p.add_argument(
         "--enable-lora",
         action="store_true",
         help="emit the base+adapter hot-mount command (requires --adapter; "
-             "glm5_next does not implement SupportsLoRA)",
+             "see 'Supported base families' in the README for per-architecture "
+             "SupportsLoRA status)",
     )
     p.add_argument(
         "--name",
         default=None,
-        help="abliterated served alias (default: glm-5.3-flash-abliterated in "
-             "shared-weight mode; abliterated in LoRA mode)",
+        help="abliterated served alias in LoRA mode (default: abliterated)",
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)
