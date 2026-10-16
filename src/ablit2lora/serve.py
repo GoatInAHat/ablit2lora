@@ -41,11 +41,27 @@ TWO_ENGINE_NOTE = (
     "not fit on hardware sized for one model.\n"
 )
 
-LORA_WARNING = (
-    "warning: hot-mounted LoRA requires the engine's model class to "
-    "implement SupportsLoRA. glm5_next (GLM-5.3-Flash) does NOT, so this "
-    "command will not hot-mount the adapter on the stock engine. Use the "
-    "two-engine baked fallback when resources permit."
+def _is_glm53_flash(base: str) -> bool:
+    """True if ``base`` names the GLM-5.3-Flash family (arch ``glm5_next``).
+
+    Matched case-insensitively against common spellings seen in HF ids and
+    local paths. Scopes the GLM-specific LoRA caveat below so it is not
+    printed for the Llama / Qwen / GLM-4-MoE bases that DO work with native
+    ``--enable-lora`` today (see "Supported base families" in the README);
+    GLM-5.3-Flash is the one known gap.
+    """
+    low = base.lower()
+    return any(marker in low for marker in ("glm-5.3-flash", "glm5next", "glm5_next"))
+
+
+GLM53_FLASH_LORA_WARNING = (
+    "warning: glm5_next (GLM-5.3-Flash) does not declare upstream SupportsLoRA "
+    "yet (tracking vllm-project/vllm#56327), so the stock vLLM engine will not "
+    "hot-mount this adapter on this base. ablit2lora ships an experimental, "
+    "UNVERIFIED registration plugin (ablit2lora.vllm_plugins.glm5next_lora) "
+    "that attempts to add the declaration out-of-tree -- see its module "
+    "docstring before relying on it. 'ablit2lora bake' plus the two-engine "
+    "fallback (--abliterated) is the reliable path on this base meanwhile."
 )
 
 
@@ -374,7 +390,10 @@ def run(
                 host=host, port=port,
                 example_name=specs[0][0], example_path=str(specs[0][1]),
             )
-            note = f"{LORA_WARNING}\n\n{NOTES}\n\n{runbook}"
+            if _is_glm53_flash(base):
+                note = f"{GLM53_FLASH_LORA_WARNING}\n\n{NOTES}\n\n{runbook}"
+            else:
+                note = f"{NOTES}\n\n{runbook}"
         else:
             text = build_sglang_multi_lora_command(
                 base, specs, max_loras=max_loras, max_lora_rank=max_lora_rank,

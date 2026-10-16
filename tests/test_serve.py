@@ -120,7 +120,27 @@ def test_run_vllm_multi_adapter_dispatch(tmp_path, capsys):
     assert "vllm serve base-model" in out
     assert "--max-loras 2" in out and "--max-lora-rank 16" in out
     assert "VLLM_ALLOW_RUNTIME_LORA_UPDATING" in out
-    assert "warning:" in out and "SupportsLoRA" in out  # LORA_WARNING is kept
+    # non-GLM base: no false "will not hot-mount" claim (Llama/Qwen/GLM-4-MoE
+    # bases DO work with native --enable-lora; see "Supported base families")
+    assert "warning:" not in out
+
+
+def test_run_vllm_multi_adapter_glm_base_warns(tmp_path, capsys):
+    a = _adapter(tmp_path, "a", rank=4)
+    b = _adapter(tmp_path, "b", rank=16)
+
+    serve.run(
+        "zai-org/GLM-5.3-Flash",
+        adapter=[f"stock-equivalent={a}", f"abliterated={b}"],
+        enable_lora=True,
+    )
+    out = _flat(capsys.readouterr().out)
+    assert "vllm serve zai-org/GLM-5.3-Flash" in out
+    # GLM-5.3-Flash specifically: the caveat names the tracking PR and the
+    # experimental, unverified registration plugin, not a blanket claim
+    assert "warning:" in out and "SupportsLoRA" in out
+    assert "vllm-project/vllm#56327" in out
+    assert "ablit2lora.vllm_plugins.glm5next_lora" in out
 
 
 def test_run_sglang_multi_adapter_dispatch(tmp_path, capsys):

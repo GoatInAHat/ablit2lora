@@ -106,7 +106,7 @@ def test_serve_adapter_requires_enable_lora(tmp_path, mixed_pair):
     assert "--enable-lora" in r.stderr
 
 
-def test_serve_enable_lora_warns(tmp_path, mixed_pair):
+def test_serve_enable_lora_non_glm_base_has_no_warning(tmp_path, mixed_pair):
     _r, out = _convert_cli(tmp_path, mixed_pair)
     r = _run(
         "serve", "--base", str(mixed_pair.base_dir),
@@ -118,7 +118,9 @@ def test_serve_enable_lora_warns(tmp_path, mixed_pair):
     assert "--lora-modules abliterated=" in flat
     assert "--max-loras 1" in flat
     assert "--max-lora-rank 8" in flat
-    assert "warning:" in flat and "SupportsLoRA" in flat
+    # mixed_pair's base is a synthetic, non-GLM checkpoint dir: the
+    # GLM-5.3-Flash-specific caveat must not appear for this base
+    assert "warning:" not in flat
 
 
 def test_serve_multi_adapter_vllm(tmp_path, mixed_pair):
