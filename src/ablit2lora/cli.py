@@ -192,10 +192,10 @@ def main(argv: list[str] | None = None) -> int:
         prog="ablit2lora",
         description=(
             "Pure converter: turn published abliterated checkpoints into "
-            "MB-scale LoRA adapters, and emit explicit vLLM serving recipes. "
-            "ablit2lora does not find refusal directions; the abliteration "
-            "labs (audnai/penclaw, orcarouter, dealignai, huihui-ai, ...) "
-            "make the checkpoints it converts."
+            "MB-scale LoRA adapters, and emit native multi-adapter vLLM/SGLang "
+            "serving recipes. ablit2lora does not find refusal directions; "
+            "the abliteration labs (audnai/penclaw, orcarouter, dealignai, "
+            "huihui-ai, ...) make the checkpoints it converts."
         ),
     )
     parser.add_argument("--version", action="version", version=__version__)
