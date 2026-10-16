@@ -42,6 +42,12 @@ Repository = "https://github.com/GoatInAHat/ablit2lora"
 [project.scripts]
 ablit2lora = "ablit2lora.cli:main"
 
+# EXPERIMENTAL, UNVERIFIED -- see src/ablit2lora/vllm_plugins/glm5next_lora.py.
+# Loaded by vLLM's own plugin discovery inside a process that has vLLM
+# installed; ablit2lora itself never imports this at runtime.
+[project.entry-points."vllm.general_plugins"]
+ablit2lora_glm5next_lora = "ablit2lora.vllm_plugins.glm5next_lora:register"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
