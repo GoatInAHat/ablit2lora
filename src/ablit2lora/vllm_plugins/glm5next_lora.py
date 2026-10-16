@@ -23,8 +23,9 @@ CRITICAL HONESTY: this has NOT been exercised against a live vLLM engine or
 a real GLM-5.3-Flash checkpoint anywhere in this repository's history. It is
 unverified against GLM-5.3-Flash's KDA (gated linear attention) and MLA
 (multi-head latent attention) projections specifically -- see the TODO
-inside ``register()`` for exactly what remains unchecked and why. Do not
-represent this as a working feature; it is a registration scaffold.
+inside ``Glm5NextForCausalLMWithLoRA`` below for exactly what remains
+unchecked and why. Do not represent this as a working feature; it is a
+registration scaffold.
 """
 
 from __future__ import annotations
@@ -35,29 +36,26 @@ logger = logging.getLogger(__name__)
 
 _ARCH = "Glm5NextForCausalLM"
 
+# The lazy "module:ClassName" string form vLLM recommends for out-of-tree
+# model registration (see register() below), rather than handing
+# ModelRegistry an already-built class object.
+_LORA_CLASS_PATH = "ablit2lora.vllm_plugins.glm5next_lora:Glm5NextForCausalLMWithLoRA"
 
-def register() -> None:
-    """``vllm.general_plugins`` entry point.
+try:
+    from vllm.model_executor.models.interfaces import SupportsLoRA
+    from vllm.models.glm5next import Glm5NextForCausalLM as _StockGlm5Next
+except ImportError:
+    # vLLM is not installed, or this build predates vllm.models.glm5next
+    # (confirmed present on vLLM main as of 2026-10-16). Guarded here at
+    # module level -- not just inside register() -- so that merely importing
+    # this module is always safe; the class below (needed for the lazy
+    # registration string to resolve to anything) is only defined when its
+    # own base classes actually exist.
+    _StockGlm5Next = None
+    SupportsLoRA = None
 
-    Called with no arguments by ``vllm.plugins.load_general_plugins()`` once
-    per process (engine core and each worker) at vLLM startup; return value
-    is ignored. Must never raise -- a broken plugin must not take down
-    everyone else's vLLM startup just because ablit2lora is installed.
-    """
-    try:
-        from vllm import ModelRegistry
-        from vllm.model_executor.models.interfaces import SupportsLoRA
-        from vllm.models.glm5next import Glm5NextForCausalLM as _StockGlm5Next
-    except ImportError:
-        # vLLM is not installed, or this build predates vllm.models.glm5next
-        # (confirmed present on vLLM main as of 2026-10-16). Either way there
-        # is nothing to patch; do not raise.
-        logger.debug(
-            "ablit2lora glm5next_lora: vllm.models.glm5next not importable "
-            "(vLLM not installed, or this build predates the architecture); "
-            "skipping"
-        )
-        return
+
+if _StockGlm5Next is not None:
 
     class Glm5NextForCausalLMWithLoRA(_StockGlm5Next, SupportsLoRA):
         """``Glm5NextForCausalLM`` plus the ``SupportsLoRA`` marker.
@@ -69,6 +67,12 @@ def register() -> None:
         whether vLLM's LoRA runtime then actually loads and applies an
         adapter correctly on this specific hybrid KDA+MLA+MoE model has not
         been checked.
+
+        Module-level (not nested inside register()) so it has a plain,
+        re-importable dotted path (``ablit2lora.vllm_plugins.glm5next_lora.
+        Glm5NextForCausalLMWithLoRA``) for register()'s lazy "module:
+        ClassName" registration string to resolve, and so the class itself
+        is picklable by reference rather than only by value.
         """
 
         # Verified by precedent, not by running this: the dense/shared-expert
@@ -124,7 +128,39 @@ def register() -> None:
         # adapter could ever target them too. Track vllm-project/vllm#56327
         # for the upstream enablement this scaffold is a head start on.
 
-    ModelRegistry.register_model(_ARCH, Glm5NextForCausalLMWithLoRA)
+
+def register() -> None:
+    """``vllm.general_plugins`` entry point.
+
+    Called with no arguments by ``vllm.plugins.load_general_plugins()`` once
+    per process (engine core and each worker) at vLLM startup; return value
+    is ignored. Must never raise -- a broken plugin must not take down
+    everyone else's vLLM startup just because ablit2lora is installed.
+    """
+    try:
+        from vllm import ModelRegistry
+    except ImportError:
+        logger.debug(
+            "ablit2lora glm5next_lora: vllm is not installed; skipping"
+        )
+        return
+    if _StockGlm5Next is None:
+        # vllm.models.glm5next was not importable at module-import time
+        # (this build predates the architecture); nothing to register.
+        logger.debug(
+            "ablit2lora glm5next_lora: vllm.models.glm5next not importable "
+            "(this build predates the architecture); skipping"
+        )
+        return
+
+    # Registered via the lazy "module:ClassName" string form -- vLLM's own
+    # recommendation for out-of-tree models -- rather than passing the class
+    # object directly: ModelRegistry resolves (imports) the class itself,
+    # lazily, instead of this plugin handing it an already-built one, which
+    # avoids import-order/CUDA-init issues in forked workers. The class is
+    # also module-level (not nested in this function), giving it the plain,
+    # re-importable dotted path this string names.
+    ModelRegistry.register_model(_ARCH, _LORA_CLASS_PATH)
     logger.info(
         "ablit2lora: registered an EXPERIMENTAL, UNVERIFIED SupportsLoRA "
         "override for %s -- see ablit2lora.vllm_plugins.glm5next_lora's "
