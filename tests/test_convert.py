@@ -155,6 +155,44 @@ def test_manifest_audit_fields(mixed_pair, tmp_path):
     assert "--enable-lora" in manifest["vllm_command"]
 
 
+def _parse_front_matter(text: str) -> dict:
+    """Parse a ``---``-delimited YAML front-matter block.
+
+    Uses PyYAML when it is importable; otherwise falls back to a minimal
+    ``key: value`` line split so this test still exercises the real
+    front-matter content without hard-requiring the dependency.
+    """
+    front_matter = text.split("---", 2)[1]
+    try:
+        import yaml
+
+        return yaml.safe_load(front_matter)
+    except ImportError:
+        data: dict = {}
+        for line in front_matter.strip().splitlines():
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            data[key.strip()] = value.strip()
+        return data
+
+
+def test_write_model_card_front_matter(mixed_pair, tmp_path):
+    out, _manifest, _state, _cfg = _convert(mixed_pair, tmp_path)
+    readme = out / "README.md"
+    assert readme.exists()
+
+    text = readme.read_text()
+    assert text.startswith("---\n")
+
+    front_matter = _parse_front_matter(text)
+    assert front_matter["library_name"] == "peft"
+    assert "base_model" in front_matter
+    assert front_matter["base_model_relation"] == "adapter"
+    tags = front_matter["tags"]
+    assert "lora" in tags  # works for a parsed list or the raw "[lora, ...]" string
+
+
 def test_peft_merge_reproduces_abliterated(tmp_path, tiny_model_dir):
     peft = pytest.importorskip("peft")
     import shutil
