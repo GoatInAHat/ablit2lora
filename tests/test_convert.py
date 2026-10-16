@@ -190,3 +190,103 @@ def test_peft_merge_reproduces_abliterated(tmp_path, tiny_model_dir):
         key = f"model.layers.{li}.self_attn.o_proj.weight"
         got = merged.model.layers[li].self_attn.o_proj.weight
         assert torch.allclose(got.float(), edited[key], atol=1e-4), li
+
+
+def test_convert_moe_expert_tensors(moe_pair, tmp_path):
+    """Backs the architecture-agnostic/MoE-aware claim: convert must target
+    only the actually-edited expert's own module path, not every expert
+    sharing a down_proj suffix, and leave untouched siblings out entirely.
+    """
+    edited_expert = "model.layers.0.mlp.experts.1.down_proj.weight"
+    shared = "model.layers.0.mlp.shared_experts.down_proj.weight"
+    edited_expert_mod = edited_expert.removesuffix(".weight")
+    shared_mod = shared.removesuffix(".weight")
+
+    _out, manifest, state, cfg = _convert(moe_pair, tmp_path)
+    recs = {r["name"]: r for r in manifest["tensors"]}
+
+    assert recs[edited_expert]["status"] == "exact"
+    assert recs[edited_expert]["rank"] == 1
+    assert recs[shared]["status"] == "exact"
+    assert recs[shared]["rank"] == 2
+
+    # untouched sibling experts (0 and 2) are unchanged and skipped entirely --
+    # not merely "not edited", but absent from the manifest's tensor list
+    for expert in (0, 2):
+        sibling = f"model.layers.0.mlp.experts.{expert}.down_proj.weight"
+        assert sibling not in recs
+        assert sibling.removesuffix(".weight") not in cfg["target_modules"]
+
+    assert sorted(cfg["target_modules"]) == sorted([edited_expert_mod, shared_mod])
+    assert cfg["r"] == cfg["lora_alpha"] == 2  # zero-padded to the larger true rank
+
+    A1 = state[f"base_model.model.{edited_expert_mod}.lora_A.weight"]
+    B1 = state[f"base_model.model.{edited_expert_mod}.lora_B.weight"]
+    assert torch.allclose(
+        moe_pair.base[edited_expert] + B1 @ A1, moe_pair.ablit[edited_expert], atol=1e-4
+    )
+    As = state[f"base_model.model.{shared_mod}.lora_A.weight"]
+    Bs = state[f"base_model.model.{shared_mod}.lora_B.weight"]
+    assert torch.allclose(
+        moe_pair.base[shared] + Bs @ As, moe_pair.ablit[shared], atol=1e-4
+    )
+
+
+def test_convert_differently_named_tensors_and_generalized_tie_detection(
+    differently_named_pair, tmp_path
+):
+    """Backs the architecture-agnostic claim for a non-default naming prefix,
+    and the generalized tie-pair fix: a tied lm_head under a prefix the old
+    hardcoded _TIE_PAIRS never covered (language_model.*) must resolve to
+    tied_unchanged, not a spurious orphan.
+    """
+    edited = "language_model.layers.0.self_attn.o_proj.weight"
+    edited_mod = edited.removesuffix(".weight")
+    orphan_lm_head = "language_model.lm_head.weight"
+
+    _out, manifest, state, cfg = _convert(differently_named_pair, tmp_path)
+    recs = {r["name"]: r for r in manifest["tensors"]}
+
+    assert recs[edited]["status"] == "exact"
+    assert recs[edited]["rank"] == 1
+    assert cfg["target_modules"] == [edited_mod]
+
+    assert recs[orphan_lm_head]["status"] == "tied_unchanged"
+    assert "sha_ablit" not in recs[orphan_lm_head]  # tied, not a real orphan
+
+    A = state[f"base_model.model.{edited_mod}.lora_A.weight"]
+    B = state[f"base_model.model.{edited_mod}.lora_B.weight"]
+    assert torch.allclose(
+        differently_named_pair.base[edited] + B @ A,
+        differently_named_pair.ablit[edited],
+        atol=1e-4,
+    )
+
+
+def test_convert_respects_explicit_tie_word_embeddings_false(tmp_path):
+    """An explicit tie_word_embeddings=False must still block the shortcut
+    even when the orphan tensor happens to be byte-identical to a same-named
+    candidate partner -- the sha check alone is not what gates this; the
+    config flag can override the shortcut away from "tied".
+    """
+    base = {
+        "model.embed_tokens.weight": torch.randn(50, 16),
+        "model.layers.0.self_attn.o_proj.weight": torch.randn(16, 16),
+    }
+    ablit = {k: v.clone() for k, v in base.items()}
+    ablit["model.layers.0.self_attn.o_proj.weight"] += _rank1(321, out=16, inn=16)
+    # byte-identical to embed_tokens, but config explicitly says NOT tied
+    ablit["model.lm_head.weight"] = base["model.embed_tokens.weight"].clone()
+
+    from conftest import write_checkpoint
+
+    base_dir = write_checkpoint(tmp_path / "base", base)
+    ablit_dir = write_checkpoint(tmp_path / "ablit", ablit)
+    (base_dir / "config.json").write_text(json.dumps({"tie_word_embeddings": False}))
+
+    out = tmp_path / "adapter"
+    convert.run(str(base_dir), str(ablit_dir), out=str(out))
+    manifest = json.loads((out / "manifest.json").read_text())
+    rec = _rec(manifest, "model.lm_head.weight")
+    assert rec["status"] == "orphan"
+    assert "sha_ablit" in rec

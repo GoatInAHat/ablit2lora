@@ -121,6 +121,53 @@ def test_serve_enable_lora_warns(tmp_path, mixed_pair):
     assert "warning:" in flat and "SupportsLoRA" in flat
 
 
+def test_serve_multi_adapter_vllm(tmp_path, mixed_pair):
+    _r, out = _convert_cli(tmp_path, mixed_pair)
+    second = tmp_path / "second-adapter"
+    second.mkdir()
+    (second / "adapter_config.json").write_text(json.dumps({"r": 16}))
+
+    r = _run(
+        "serve", "--base", str(mixed_pair.base_dir),
+        "--adapter", f"stock-equivalent={out}",
+        "--adapter", f"abliterated={second}",
+        "--enable-lora",
+    )
+    assert r.returncode == 0, r.stderr
+    flat = _flat(r.stdout)
+    assert "vllm serve" in flat
+    assert f"--lora-modules stock-equivalent={out} abliterated={second}" in flat
+    assert "--max-loras 2" in flat
+    # mixed_pair's converted adapter is rank 3; the second is rank 16 -> max wins
+    assert "--max-lora-rank 16" in flat
+    assert "VLLM_ALLOW_RUNTIME_LORA_UPDATING=True" in r.stdout
+    assert "/v1/load_lora_adapter" in flat and "/v1/unload_lora_adapter" in flat
+
+
+def test_serve_multi_adapter_sglang_with_overrides(tmp_path, mixed_pair):
+    _r, out = _convert_cli(tmp_path, mixed_pair)
+    second = tmp_path / "second-adapter"
+    second.mkdir()
+    (second / "adapter_config.json").write_text(json.dumps({"r": 16}))
+
+    r = _run(
+        "serve", "--base", str(mixed_pair.base_dir),
+        "--adapter", f"stock-equivalent={out}",
+        "--adapter", f"abliterated={second}",
+        "--enable-lora", "--engine", "sglang",
+        "--max-loras", "4", "--max-lora-rank", "64",
+    )
+    assert r.returncode == 0, r.stderr
+    flat = _flat(r.stdout)
+    assert "python -m sglang.launch_server" in flat
+    assert "--model-path" in flat
+    assert f"--lora-paths stock-equivalent={out} abliterated={second}" in flat
+    assert "--max-loras-per-batch 4" in flat  # explicit override, not the count of 2
+    assert "--max-lora-rank 64" in flat  # explicit override, not the auto max of 16
+    assert "/load_lora_adapter" in flat
+    assert "warning:" not in flat  # the glm5_next/vLLM-specific warning is vLLM-only
+
+
 def test_bake_fuses_only_converted(tmp_path, mixed_pair):
     _r, out = _convert_cli(tmp_path, mixed_pair)
     fused = tmp_path / "fused"

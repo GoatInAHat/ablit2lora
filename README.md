@@ -260,10 +260,14 @@ other base families and other engines welcome.
 Tests are CPU-only with synthetic safetensors checkpoint pairs (exact
 rank-1 edits, rank-3 edits, fully retrained tensors, changed 1-D tensors,
 MoE expert tensors, differently-named tensors) plus a tiny random-weight
-LlamaForCausalLM for the PEFT end-to-end -- no downloads. Key tests: an
-exact rank-1 edit converts to r=1 with residual ~0; rank-3 edits escalate
-to the true rank; retrained tensors are flagged, never approximated; a PEFT
-merge of the converted adapter reproduces the abliterated weights; and the
-emitted vLLM/SGLang multi-adapter commands carry the right flags.
+LlamaForCausalLM for the PEFT and perplexity end-to-end -- no downloads, no
+vLLM/SGLang required. Key tests: an exact rank-1 edit converts to r=1 with
+residual ~0; rank-3 edits escalate to the true rank; retrained tensors are
+flagged, never approximated; a PEFT merge of the converted adapter
+reproduces the abliterated weights; the emitted vLLM/SGLang multi-adapter
+commands carry the right flags (names, --max-loras, --max-lora-rank read
+from each adapter_config.json); and eval's perplexity matches an
+independent cross-entropy computation. CI (`.github/workflows/ci.yml`)
+runs ruff and pytest on push/PR against Python 3.11 and 3.12.
 
 MIT license. Python >= 3.10.

@@ -142,6 +142,120 @@ def mixed_pair(tmp_path_factory):
     )
 
 
+def moe_tensors(seed: int = 11) -> dict[str, torch.Tensor]:
+    """A small MoE-shaped layer: three per-expert tensors + one shared expert."""
+    g = torch.Generator().manual_seed(seed)
+    tensors: dict[str, torch.Tensor] = {
+        "model.embed_tokens.weight": torch.randn(100, 32, generator=g) * 0.1,
+        "model.layers.0.self_attn.o_proj.weight": torch.randn(32, 32, generator=g),
+    }
+    for expert in range(3):
+        tensors[f"model.layers.0.mlp.experts.{expert}.gate_proj.weight"] = (
+            torch.randn(24, 32, generator=g)
+        )
+        tensors[f"model.layers.0.mlp.experts.{expert}.down_proj.weight"] = (
+            torch.randn(32, 24, generator=g)
+        )
+    tensors["model.layers.0.mlp.shared_experts.down_proj.weight"] = torch.randn(
+        32, 24, generator=g
+    )
+    return tensors
+
+
+@pytest.fixture(scope="session")
+def moe_pair(tmp_path_factory):
+    """MoE checkpoint pair: edits exactly one expert index plus the shared
+    expert, leaving sibling experts byte-identical.
+
+    Backs the architecture-agnostic/MoE-aware claim: convert must target
+    only the actually-edited expert's module path, not every tensor sharing
+    a `down_proj` suffix, and must leave untouched sibling experts out of
+    the adapter entirely.
+    """
+
+    def edit(ablit, _base):
+        g1 = torch.Generator().manual_seed(201)
+        ablit["model.layers.0.mlp.experts.1.down_proj.weight"] += torch.outer(
+            torch.randn(32, generator=g1), torch.randn(24, generator=g1)
+        )
+        g2 = torch.Generator().manual_seed(202)
+        ablit["model.layers.0.mlp.shared_experts.down_proj.weight"] += (
+            torch.randn(32, 2, generator=g2) @ torch.randn(2, 24, generator=g2)
+        )
+
+    base = moe_tensors()
+    ablit = {k: v.clone() for k, v in base.items()}
+    edit(ablit, base)
+    return SimpleNamespace(
+        base_dir=write_checkpoint(tmp_path_factory.mktemp("moe-base"), base),
+        ablit_dir=write_checkpoint(tmp_path_factory.mktemp("moe-ablit"), ablit),
+        base=base,
+        ablit=ablit,
+    )
+
+
+def differently_named_tensors(seed: int = 12) -> dict[str, torch.Tensor]:
+    """Same shapes as base_tensors(), under a non-default naming prefix.
+
+    No other fixture in this file uses anything but ``model.layers.N...``;
+    this one uses ``language_model.*`` (as some multimodal wrappers do) to
+    make sure convert's tensor matching and tie-detection are not secretly
+    hardcoded to the common prefix.
+    """
+    g = torch.Generator().manual_seed(seed)
+    return {
+        "language_model.embed_tokens.weight": torch.randn(100, 32, generator=g) * 0.1,
+        "language_model.layers.0.self_attn.o_proj.weight": torch.randn(
+            32, 32, generator=g
+        ),
+        "language_model.layers.1.mlp.down_proj.weight": torch.randn(
+            24, 32, generator=g
+        ),
+        "language_model.final_layernorm.weight": torch.ones(32),
+    }
+
+
+@pytest.fixture(scope="session")
+def differently_named_pair(tmp_path_factory):
+    """A checkpoint pair using the language_model.* naming convention.
+
+    The base checkpoint relies on tied embeddings and never materializes a
+    separate lm_head.weight tensor (as real tied-embedding checkpoints
+    commonly do); the published abliteration materializes one anyway, equal
+    to the (untouched) embed_tokens.weight. That lm_head tensor exists only
+    on the abliterated side (an "only_ablit" orphan) with a prefix none of
+    the old hardcoded _TIE_PAIRS covered. Also edits one attention module,
+    unrelated to the tie detection, to exercise a normal rank-1 adapter
+    entry under this same non-default naming convention.
+
+    Backs both the architecture-agnostic claim and the generalized
+    tie-detection fix (ablit2lora.convert._tied_lm_head / _tie_word_embeddings),
+    which must match on whatever prefix precedes
+    lm_head.weight/embed_tokens.weight and must read the real
+    tie_word_embeddings flag, not just the two literal names the old
+    hardcoded pairs covered.
+    """
+
+    def edit(ablit, _base):
+        g = torch.Generator().manual_seed(203)
+        ablit["language_model.layers.0.self_attn.o_proj.weight"] += torch.outer(
+            torch.randn(32, generator=g), torch.randn(32, generator=g)
+        )
+        # orphan: present only in the abliterated checkpoint, tied to the
+        # (unedited, therefore base-identical) embed_tokens tensor
+        ablit["language_model.lm_head.weight"] = ablit[
+            "language_model.embed_tokens.weight"
+        ].clone()
+
+    base = differently_named_tensors()
+    ablit = {k: v.clone() for k, v in base.items()}
+    edit(ablit, base)
+    base_dir = write_checkpoint(tmp_path_factory.mktemp("named-base"), base)
+    ablit_dir = write_checkpoint(tmp_path_factory.mktemp("named-ablit"), ablit)
+    (base_dir / "config.json").write_text(json.dumps({"tie_word_embeddings": True}))
+    return SimpleNamespace(base_dir=base_dir, ablit_dir=ablit_dir, base=base, ablit=ablit)
+
+
 @pytest.fixture()
 def fp8_pair_factory(tmp_path):
     """(base, abliterated) pair stored as FP8 block-scale checkpoints."""
