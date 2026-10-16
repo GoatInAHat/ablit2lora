@@ -47,6 +47,17 @@ def _is_refusal(text: str) -> bool:
     return any(m in low for m in REFUSAL_MARKERS)
 
 
+def _lora_rank(adapter: str | None) -> int:
+    """vLLM's max_lora_rank for this adapter, like build_lora_command; 8 if absent."""
+    if not adapter:
+        return 8
+    cfg_file = Path(adapter) / "adapter_config.json"
+    if not cfg_file.exists():
+        return 8
+    rank = int(json.loads(cfg_file.read_text()).get("r", 1))
+    return max(8, rank)
+
+
 def _ppl(net, tokenizer, texts, device, max_length=1024) -> float:
     tot, cnt = 0.0, 0
     net.eval()
@@ -70,8 +81,8 @@ def _refusals_vllm(model, adapter, texts, limit):
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
 
-    llm = LLM(model=model, enable_lora=adapter is not None, max_lora_rank=8,
-              max_model_len=2048)
+    llm = LLM(model=model, enable_lora=adapter is not None,
+              max_lora_rank=_lora_rank(adapter), max_model_len=2048)
     sp = SamplingParams(temperature=0.0, max_tokens=64)
     kwargs = {}
     if adapter:

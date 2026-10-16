@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shlex
 from pathlib import Path
 
 import torch
@@ -31,7 +32,6 @@ import torch
 from . import __version__
 from .adapter import write_adapter
 from .quant import block_size_for, dequant_blockwise, dtype_family, find_scale_key
-from .serve import build_lora_command
 from .weights import LazyWeights
 
 log = logging.getLogger(__name__)
@@ -42,10 +42,8 @@ _DTYPE_MAP = {
     "float16": torch.float16,
 }
 
-_TIE_PAIRS = (
-    ("lm_head.weight", "model.embed_tokens.weight"),
-    ("model.lm_head.weight", "model.embed_tokens.weight"),
-)
+_LM_HEAD_SUFFIX = "lm_head.weight"
+_EMBED_SUFFIX = "embed_tokens.weight"
 
 
 def tensor_sha256(t: torch.Tensor) -> str:
@@ -132,18 +130,76 @@ def _scale_keys(w: LazyWeights) -> set[str]:
     return out
 
 
-def _tied_lm_head(name: str, orphan: LazyWeights, other: LazyWeights) -> bool:
-    """True if an orphan tensor is just a tied lm_head equal to the base."""
-    for a_name, b_name in _TIE_PAIRS:
-        for want, partner in ((a_name, b_name), (b_name, a_name)):
-            if name != want or partner not in other or want not in orphan:
-                continue
-            ta, tb = orphan.get(want), other.get(partner)
-            return (
-                ta.shape == tb.shape
-                and ta.dtype == tb.dtype
-                and tensor_sha256(ta) == tensor_sha256(tb)
-            )
+def _lora_serve_hint(base: str, adapter_dir: str, rank: int) -> str:
+    """A ready-to-run vLLM hot-mount command for this adapter.
+
+    A minimal, self-contained render: convert must not depend on the serving
+    CLI (ablit2lora.serve). See ablit2lora.serve.build_lora_command (or
+    `ablit2lora serve --adapter`) for the full-featured, independently
+    invocable command builder, including multi-adapter and SGLang variants.
+    """
+    adapter_path = Path(adapter_dir).resolve()
+    return (
+        f"vllm serve {shlex.quote(str(base))} --enable-lora "
+        f"--lora-modules abliterated={shlex.quote(str(adapter_path))} "
+        f"--max-lora-rank {max(8, rank)}"
+    )
+
+
+def _tie_word_embeddings(*paths: str) -> bool | None:
+    """``tie_word_embeddings`` from the first checkpoint config.json that has it.
+
+    Checks top-level config.json first, then a nested "text_config" (as used
+    by some multimodal wrappers). None if neither checkpoint's config says
+    either way.
+    """
+    for path in paths:
+        cfg_file = Path(path) / "config.json"
+        if not cfg_file.exists():
+            continue
+        try:
+            data = json.loads(cfg_file.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if "tie_word_embeddings" in data:
+            return bool(data["tie_word_embeddings"])
+        text_cfg = data.get("text_config")
+        if isinstance(text_cfg, dict) and "tie_word_embeddings" in text_cfg:
+            return bool(text_cfg["tie_word_embeddings"])
+    return None
+
+
+def _tied_lm_head(
+    name: str, orphan: LazyWeights, other: LazyWeights, tied: bool | None
+) -> bool:
+    """True if an orphan tensor is just a tied lm_head equal to the other side.
+
+    Generic over the naming prefix (``lm_head.weight``, ``model.lm_head.weight``,
+    ``language_model.lm_head.weight``, ...): whatever precedes
+    ``lm_head.weight``/``embed_tokens.weight`` must match on both tensors.
+    ``tied is False`` short-circuits (the checkpoint says they are not tied);
+    unknown config does not block the check, since the sha256 equality test
+    below is already conservative -- it only ever returns True on
+    byte-identical tensors, tied flag or not.
+    """
+    if tied is False:
+        return False
+    for want_suffix, partner_suffix in (
+        (_LM_HEAD_SUFFIX, _EMBED_SUFFIX),
+        (_EMBED_SUFFIX, _LM_HEAD_SUFFIX),
+    ):
+        if not name.endswith(want_suffix) or name not in orphan:
+            continue
+        partner = name[: -len(want_suffix)] + partner_suffix
+        if partner not in other:
+            continue
+        ta, tb = orphan.get(name), other.get(partner)
+        if (
+            ta.shape == tb.shape
+            and ta.dtype == tb.dtype
+            and tensor_sha256(ta) == tensor_sha256(tb)
+        ):
+            return True
     return False
 
 
@@ -180,6 +236,7 @@ def run(
     scales_a = _scale_keys(aw)
     block_b = block_size_for(bw.path)
     block_a = block_size_for(aw.path)
+    tied_word_embeddings = _tie_word_embeddings(bw.path, aw.path)
 
     records: list[dict] = []
     entries: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -306,7 +363,7 @@ def run(
             "dtype_base": None,
             "dtype_ablit": ra.dtype,
         }
-        if _tied_lm_head(name, aw, bw):
+        if _tied_lm_head(name, aw, bw, tied_word_embeddings):
             rec["status"] = "tied_unchanged"
         else:
             rec["status"] = "orphan"
@@ -401,7 +458,7 @@ def run(
         dtype=_DTYPE_MAP[adapter_dtype],
     )
     adapter_bytes = (out_dir / "adapter_model.safetensors").stat().st_size
-    cmd = build_lora_command(base, str(out_dir))
+    cmd = _lora_serve_hint(base, str(out_dir), uniform_rank)
     manifest["adapter"] = {
         "path": str(out_dir),
         "uniform_rank": uniform_rank,
