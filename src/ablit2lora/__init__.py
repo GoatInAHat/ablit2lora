@@ -7,4 +7,4 @@ MB-scale PEFT LoRA adapter, then emits native multi-adapter vLLM/SGLang
 serving recipes for it. ablit2lora never finds refusal directions itself.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"

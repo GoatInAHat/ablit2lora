@@ -153,6 +153,46 @@ the `glm53-ablation-plugin` repo and is out of scope for this general tool.
 `--enable-lora` for vLLM or SGLang (`--engine sglang`), `--abliterated
 <dir>` for the bake fallback.
 
+## Other engines and the Hub
+
+The adapter is a plain PEFT directory, so other tooling can consume it.
+These notes come from upstream docs and source (llama.cpp at commit
+`ea0c4c2`, huggingface_hub docs, 2026-10-16). None of it was run with an
+ablit2lora adapter here.
+
+**llama.cpp.** `convert_lora_to_gguf.py` (repo root) converts a PEFT adapter
+to GGUF: `python convert_lora_to_gguf.py <adapter-dir> --base <base-config-dir>
+--outfile adapter.gguf`. It reads `adapter_config.json` and
+`adapter_model.safetensors`, needs only the base model's config (not its
+weights), and requires `lora_alpha` in `adapter_config.json`, which convert
+always writes. llama.cpp scales by `alpha / rank` with the rank taken from the
+tensor shapes, so `lora_alpha == r` stays scale 1.0 as in PEFT. The base
+architecture must be one the converter supports; support for GLM-5.3-Flash was
+not checked. `llama-server` takes several adapters (`--lora a.gguf,b.gguf`,
+`--lora-scaled`) and selects them per request through a `lora` list of
+`{"id": N, "scale": S}` objects, documented under `POST /completion`. Per the
+source, `--lora` adapters start at scale 1.0 and a request with no `lora` list
+(or an empty one) falls back to those scales, so send an explicit scale
+(for example `[{"id": 0, "scale": 0.0}]`) to switch an adapter off; upstream
+has open issues reporting prompt-cache reuse across different `lora`
+settings. The converter's embedding path (`lora_embedding_A/B`) exists in
+source but was not tried; adapters that carry full `embed_tokens` or
+`lm_head` weights are rejected.
+
+**Hugging Face Hub.** `hf` is the current CLI (`huggingface-cli` was
+deprecated in huggingface_hub 0.34 and removed in 1.0). After `hf auth login`:
+
+    hf upload <user>/<repo> <adapter-dir> . --private
+
+uploads the whole directory, creating the repo if needed (`--private` applies
+only at creation). The directory already holds `adapter_config.json`,
+`adapter_model.safetensors` and the model card. `manifest.json` records
+`base_path` and `abliterated_path` exactly as passed to convert, so check it
+for local paths before publishing. The adapter derives from both checkpoints;
+check their licences. Load it with
+`PeftModel.from_pretrained(base_model, "<user>/<repo>")`. ablit2lora itself
+never uploads anything.
+
 ## Precision & quantization
 
 The per-tensor diff in convert runs in float32; compare checkpoints at

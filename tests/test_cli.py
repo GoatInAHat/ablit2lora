@@ -39,7 +39,7 @@ def test_help(cmd):
 
 def test_version():
     r = _run("--version")
-    assert r.returncode == 0 and "0.4.0" in r.stdout
+    assert r.returncode == 0 and "0.4.1" in r.stdout
 
 
 def _convert_cli(tmp_path, pair, *extra):
