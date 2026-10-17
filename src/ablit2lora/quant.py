@@ -88,26 +88,30 @@ def block_size_for(path: str | Path) -> tuple[int, int]:
     return DEFAULT_BLOCK
 
 
-def dequant_blockwise(
-    w_fp8: torch.Tensor, scale: torch.Tensor, block: tuple[int, int] = DEFAULT_BLOCK
+def expand_block_scale(
+    scale: torch.Tensor, shape: tuple[int, ...], block: tuple[int, int]
 ) -> torch.Tensor:
-    """Dequantize an fp8 weight + blockwise scales to float32."""
-    if w_fp8.ndim != 2:
-        raise ValueError(
-            f"fp8 dequant needs a 2-D weight, got shape {tuple(w_fp8.shape)}"
-        )
-    out_f, in_f = w_fp8.shape
+    """Broadcast blockwise scales to a per-element float32 [out, in] map."""
+    if len(shape) != 2:
+        raise ValueError(f"fp8 dequant needs a 2-D weight, got shape {tuple(shape)}")
+    out_f, in_f = shape
     rb, cb = block
     nb_r = (out_f + rb - 1) // rb
     nb_c = (in_f + cb - 1) // cb
     if tuple(scale.shape) != (nb_r, nb_c):
         raise ValueError(
             f"scale shape {tuple(scale.shape)} does not match block grid "
-            f"{(nb_r, nb_c)} for weight {tuple(w_fp8.shape)} with block {block}"
+            f"{(nb_r, nb_c)} for weight {tuple(shape)} with block {block}"
         )
     s = scale.float().repeat_interleave(rb, dim=0)[:out_f]
-    s = s.repeat_interleave(cb, dim=1)[:, :in_f]
-    return w_fp8.float() * s
+    return s.repeat_interleave(cb, dim=1)[:, :in_f]
+
+
+def dequant_blockwise(
+    w_fp8: torch.Tensor, scale: torch.Tensor, block: tuple[int, int] = DEFAULT_BLOCK
+) -> torch.Tensor:
+    """Dequantize an fp8 weight + blockwise scales to float32."""
+    return w_fp8.float() * expand_block_scale(scale, tuple(w_fp8.shape), block)
 
 
 def quantize_blockwise(

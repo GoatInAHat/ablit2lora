@@ -11,13 +11,19 @@ from . import __version__, bake, convert, serve
 from . import eval as eval_mod
 
 PRECISION_NOTE = (
-    "Precision: the per-tensor diff runs in float32. BF16 pairs diff on "
-    "their stored weights; FP8 pairs (float8_e4m3fn + block scales) are "
-    "dequantized first, and the FP8 grid re-rounding on changed blocks "
-    "surfaces as elevated residuals/flags -- that is the measurement, "
-    "recorded in manifest.json. NVFP4 is out of scope for convert (FP4 "
-    "grid noise dominates the diff; use the BF16 pair). Diff at the "
-    "highest precision both sides share; quantize after converting."
+    "Precision: the per-tensor diff runs in float32 on each side's stored "
+    "values. A BF16 or FP8 pair stores the edit plus rounding noise from both "
+    "storage grids, so the diff is low-rank signal plus a full-rank noise "
+    "floor that no rank can fit. convert estimates that floor from the "
+    "stored values (per-element grid spacing; FP8 pairs are dequantized "
+    "first and use the block-scaled grid) and accepts a tensor at the rank "
+    "of its singular values above the noise ceiling when what remains is "
+    "within the noise budget (status within_noise); --noise-margin 0 turns "
+    "this off. The adapter reproduces the edit, not the rounding noise, so "
+    "serving it over the base can differ from the abliterated checkpoint by "
+    "about that noise. NVFP4 is out of scope for convert (FP4 grid noise "
+    "dominates the diff; use the BF16 pair). Diff at the highest precision "
+    "both sides share; quantize after converting."
 )
 
 
@@ -29,8 +35,9 @@ def _add_convert(sub):
             "Diff a published abliterated checkpoint against its base and emit "
             "a PEFT LoRA adapter (lora_alpha == r, scale exactly 1.0) plus "
             "manifest.json and a ready-to-run vLLM serve command. Unchanged "
-            "tensors are skipped; genuinely-retrained tensors (residual never "
-            "below tol) are flagged in the manifest, never silently approximated."
+            "tensors are skipped; tensors whose change is not a low-rank edit "
+            "(retrained, or rank above --max-rank) are flagged in the manifest, "
+            "never silently approximated."
         ),
         epilog=PRECISION_NOTE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -45,7 +52,25 @@ def _add_convert(sub):
         "--tol",
         type=float,
         default=1e-3,
-        help="per-tensor relative Frobenius residual threshold (default 1e-3)",
+        help="strict relative Frobenius residual threshold (default 1e-3): a "
+             "tensor whose rank-k residual is below it is accepted as exact. "
+             "On BF16/FP8 pairs storage rounding noise keeps the residual above "
+             "this at every rank (4-15%% of the diff for BF16, 50-150%% for "
+             "FP8 in synthetic pairs); those tensors go through the "
+             "noise-aware rule instead (see --noise-margin). Loosening --tol "
+             "is not a substitute: it does not separate the edit from the "
+             "noise",
+    )
+    p.add_argument(
+        "--noise-margin",
+        type=float,
+        default=2.0,
+        help="multiple of the estimated storage rounding-noise energy allowed "
+             "as residual when a tensor fails --tol (default 2.0). The "
+             "tensor is accepted as within_noise at the number of singular "
+             "values above the noise ceiling, if the remaining energy is "
+             "within tol^2 * total + margin * noise energy. 0 disables the "
+             "noise allowance: strict --tol only, as in v0.4.0",
     )
     p.add_argument(
         "--max-rank",
@@ -68,8 +93,8 @@ def _add_convert(sub):
     p.add_argument(
         "--include-flagged",
         action="store_true",
-        help="also emit best-effort factors for flagged (retrained) tensors; "
-             "they stay marked in manifest.json",
+        help="also emit best-effort factors (rank --max-rank) for flagged "
+             "tensors; they stay marked included_best_effort in manifest.json",
     )
     p.add_argument("--out", default="adapter", help="output adapter directory")
     p.set_defaults(func=convert.run)
