@@ -57,6 +57,10 @@ v0.2.0, v0.3.0 and v0.3.1 only.
 ### Added
 
 - `--noise-margin` on `convert`.
+- `examples/kl_check.py`: merges an adapter into the base with PEFT and
+  measures KL and top-1 agreement against the published abliterated model.
+  README "Tested on" now reports it on two real Qwen3-0.6B pairs and states
+  that the 0.4 serving path has not been run against a live engine.
 - README section on llama.cpp (`convert_lora_to_gguf.py`, `llama-server`
   `--lora`) and Hugging Face Hub upload (`hf upload`). Taken from upstream
   docs and source; not run with an ablit2lora adapter.

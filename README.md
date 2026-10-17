@@ -310,26 +310,50 @@ the same base -- vs a full re-release per variant.
 
 ## Tested on
 
-Developed and exercised live only on 2 NVIDIA DGX Spark nodes running
-GLM-5.3-Flash. Core convert/bake logic is architecture-agnostic by
-construction (a pure safetensors-level tensor diff/fuse that never loads
-model code) and is covered by the CPU-only synthetic test suite across
-dense and MoE checkpoint shapes, differently-named tensors, and FP8
-block-scale pairs -- not by a live run on every family in "Supported base
-families." The vLLM and SGLang serving commands are unit-tested for correct
-flags but have not all been exercised against a live engine here (the
-GLM-5.3-Flash LoRA plugin explicitly has not -- see above). Reports from
-other base families and other engines welcome.
+- **convert on real published pairs (0.4.1, CPU).** `Qwen/Qwen3-0.6B`
+  (BF16) against `mlabonne/Qwen3-0.6B-abliterated` and
+  `DavidAU/Qwen3-0.6B-heretic-abliterated-uncensored`, default flags. Every
+  edited tensor was accepted `within_noise` (56/56 and 35/35). The base with
+  the adapter merged by PEFT reproduces each published abliterated model:
+
+  | Pair | Model | Mean KL to abliterated | Top-1 agreement |
+  |---|---|---|---|
+  | mlabonne | base | 0.074 | 89.3% |
+  | mlabonne | base + adapter | 2.4e-5 | 100% |
+  | heretic | base | 0.037 | 88.7% |
+  | heretic | base + adapter | 9.5e-6 | 100% |
+
+  KL(abliterated || model) over 355 positions: 8 prompts plus a 24-token
+  greedy continuation from the abliterated model. Reproduce with
+  `examples/kl_check.py`.
+- **Synthetic suite.** Core convert/bake logic is architecture-agnostic by
+  construction (a pure safetensors-level tensor diff/fuse that never loads
+  model code). The CPU-only test suite covers dense and MoE checkpoint
+  shapes, differently-named tensors, BF16 and FP8 storage noise, and FP8
+  block-scale pairs. It is not a live run on every family in "Supported
+  base families".
+- **Serving.** The vLLM and SGLang commands are unit-tested for correct
+  flags and endpoints but have not been run against a live engine for this
+  release. The GLM-5.3-Flash LoRA plugin is unverified (see above).
+- **Hardware.** Developed on 2 NVIDIA DGX Spark nodes that serve
+  GLM-5.3-Flash. The 0.4 serving path has not been deployed there yet.
+
+Reports from other base families and other engines welcome.
 
 ## Limitations
 
 - **NVFP4 is out of scope for convert** (FP4 grid noise dominates a
   checkpoint-vs-checkpoint diff); convert the BF16 pair and bake instead.
 - **Noise-aware acceptance is an estimate.** `within_noise` rests on a model
-  of the BF16/FP8 rounding grid, exercised here on synthetic pairs. An edit
-  smaller than the noise ceiling cannot be told from rounding and is
-  reported as `noise_only` (not carried). Use `eval` to judge accepted
-  tensors; `--noise-margin 0` restores the strict `--tol` rule.
+  of the BF16/FP8 rounding grid, checked on synthetic pairs and the two real
+  pairs above. Real rounding noise is structured, so the selected rank can
+  exceed the edit's true rank: the mlabonne edit is dominated by one
+  singular direction (s1/s2 of 9-194) yet was accepted at rank 1-5. The
+  extra components are at noise scale and did not change behaviour (see
+  Tested on). An edit smaller than the noise ceiling cannot
+  be told from rounding and is reported as `noise_only` (not carried). Use
+  `eval` or `examples/kl_check.py` to judge accepted tensors;
+  `--noise-margin 0` restores the strict `--tol` rule.
 - **Embedding edits.** Abliteration recipes that orthogonalize the embedding
   matrix change `embed_tokens`; convert writes it in PEFT's
   `lora_embedding_A/B` layout (PEFT merge reproduces it). Engine support for
