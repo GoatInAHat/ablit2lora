@@ -30,7 +30,9 @@ NOTES = (
     "  as the reliable fallback on any quantized base.\n"
     "- Converted adapters use lora_alpha == r (LoRA scale exactly 1.0), so "
     "served\n"
-    "  weights equal base + the measured delta in the serving dtype.\n"
+    "  weights are base + the adapter's low-rank factors of the measured "
+    "delta\n"
+    "  (the edit, not the checkpoints' storage rounding noise).\n"
 )
 
 TWO_ENGINE_NOTE = (

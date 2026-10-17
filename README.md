@@ -43,26 +43,41 @@ published edits as adapters.
 ## How convert works
 
     ablit2lora convert --base <hf-id-or-path> --abliterated <hf-id-or-path> \
-      [--tol 1e-3] [--max-rank 8] [--out adapter]
+      [--tol 1e-3] [--noise-margin 2] [--max-rank 8] [--out adapter]
 
 1. **Stream both checkpoints lazily** (safetensors memory-mapping; two
    tensors in RAM at a time, never full copies) and match tensors by name.
 2. **Per matched tensor**: delta = W_ablit - W_base, then one exact SVD
    (BF16 pairs diff their stored weights; FP8 pairs are dequantized first --
-   see "Precision & quantization" below):
-   - rank-1 residual < tol -> exact r=1 LoRA factors (the classic
-     abliteration case)
-   - otherwise escalate rank until the residual < tol or --max-rank,
-     recording the residual per tensor
-   - unchanged tensors are skipped
-   - genuinely-retrained tensors (residual never < tol) are **flagged in
-     manifest.json, not silently approximated**; opt in with
-     --include-flagged for best-effort factors
+   see "Precision & quantization" below). Every changed 2-D tensor gets one
+   status in manifest.json:
+   - `exact`: some rank k <= --max-rank leaves a relative residual < --tol
+     (the classic abliteration case: rank 1).
+   - `within_noise`: no rank clears --tol, but the tensor is a low-rank edit
+     sitting on storage rounding noise (below). The singular values above
+     what rounding noise alone can produce set the rank k (<= --max-rank),
+     and what the rank-k factors leave behind is within `--noise-margin`
+     (default 2) times the estimated noise energy.
+   - `noise_only`: nothing stands above the rounding noise and the whole
+     diff is within that budget, so there is no edit to carry. The tensor is
+     not put in the adapter.
+   - `flagged`: signal that does not fit: the edit's rank is above
+     --max-rank, or what is left exceeds the noise budget (retrained), or
+     there is more energy than rounding explains but no clear low-rank part
+     (`diffuse`). Flagged tensors are **recorded in manifest.json with the
+     reason, not silently approximated**; opt in with --include-flagged for
+     best-effort factors (reported separately as `included_best_effort`).
+   - unchanged tensors are skipped; non-2-D changes are `noise_only` when
+     they are within rounding and otherwise `unrepresentable`.
+   The rounding noise is estimated from the stored values alone (the grid
+   spacing at every element), so the same rule covers BF16, FP16 and FP8.
+   `--noise-margin 0` turns the allowance off and gives the strict `--tol`
+   rule only.
 3. **Emit**: a PEFT-compatible adapter directory (factors zero-padded to a
    uniform rank, lora_alpha == r so the LoRA scale is exactly 1.0), a
-   manifest.json (per-tensor sha refs, delta norm, chosen rank, residual),
-   a Hub-ready README.md model card, and the ready-to-run vLLM serve
-   command.
+   manifest.json (per-tensor sha refs, delta norm, chosen rank, residual,
+   status, noise estimates, warnings), a Hub-ready README.md model card, and
+   the ready-to-run vLLM serve command.
 
 ## Quickstart
 
@@ -141,19 +156,35 @@ the `glm53-ablation-plugin` repo and is out of scope for this general tool.
 ## Precision & quantization
 
 The per-tensor diff in convert runs in float32; compare checkpoints at
-matching precision:
+matching precision.
 
-- **BF16/FP16 pair**: diffed as stored. LoRA on a BF16/FP16 base is fully
-  supported by every serving engine here.
+**Why a fixed tolerance is not enough.** A BF16 or FP8 checkpoint stores
+every weight rounded to a coarse grid, so the difference of two published
+checkpoints is the abliteration edit plus rounding noise from both grids.
+That noise is full-rank and its size is set by the storage format, not by the
+edit, so the residual of the best low-rank fit has a floor that no rank gets
+under. In this repo's synthetic pairs the floor is 4-15% of ||delta|| for
+BF16 and 50-150% for FP8. The familiar "2-3% FP8 quantization noise" is
+relative to ||W||; the convert residual is relative to ||delta||, which is
+far smaller than ||W||, so it is a much larger fraction of the diff. Loosening
+`--tol` therefore does not help: it cannot separate the edit from the noise,
+it only accepts both. The noise-aware rule in "How convert works" handles it
+by estimating the noise from the stored values and accepting the rank the
+signal supports (`within_noise`). The estimate is a model of the rounding
+grid exercised here on synthetic pairs, so confirm accepted tensors with
+`ablit2lora eval`; `--noise-margin 0` restores the strict rule.
+
+- **BF16/FP16 pair**: diffed as stored. A float32 file whose values all lie
+  on the BF16 (or FP16) grid is treated as that dtype, since that is the
+  precision it was computed at. LoRA on a BF16/FP16 base is fully supported
+  by every serving engine here.
 - **FP8 pair** (block-scale `float8_e4m3fn` + `<module>.weight_scale_inv`,
   GLM-5.3-Flash-style 128x128 blocks): both sides are dequantized
   automatically before the diff; manifest.json records the dequant method
-  and per-tensor block-scale provenance. The FP8 grid re-rounds the edited
-  blocks, so the measured delta carries ~2-3% quant noise -- use a looser
-  `--tol` (e.g. 0.05) than a BF16 pair's; that residual is the honest
-  measurement, not a failure. LoRA on an FP8 base is supported for major
-  architectures on recent vLLM; upgrade vLLM or `bake` if yours rejects the
-  adapter.
+  and per-tensor block-scale provenance. The noise estimate uses the FP8
+  grid of each block times its block scale. LoRA on an FP8 base is supported
+  for major architectures on recent vLLM; upgrade vLLM or `bake` if yours
+  rejects the adapter.
 - **NVFP4/MXFP4 (ModelOpt) is out of scope for convert**: the FP4 grid
   re-quantizes every 16 elements and its scales are split across shards
   (per-16 `weight_scale` + per-tensor `weight_scale_2`), so a
@@ -164,14 +195,26 @@ matching precision:
   serving engine here -- `bake` is the reliable fallback on any quantized
   base.
 
+**FP8 serving: prefer the adapter over an FP8 bake.** Re-rounding a small
+edit into FP8 storage is lossy relative to the edit itself. In the synthetic
+FP8 bake case measured in the v0.4.0 review (random weights, edits 1.6-3.8%
+of ||W||, bake = dequantize, fuse, requantize), only 71-94% of the edit's top
+singular value survives, and a rank-1 fit to the baked edit is off by 16-41%
+of the edit's norm. So for an FP8 base either serve the converted adapter
+over it (`--enable-lora`; LoRA applies the delta at runtime in the LoRA
+dtype, on top of the quantized base) or `bake --output-dtype bfloat16`. An
+FP8 `bake` is a valid checkpoint but not a faithful copy of a small edit.
+
 The adapter itself is precision-portable: compute it once from a
 matching-precision pair, then serve that same adapter over any quantization
 of the same base via `--enable-lora` (the LoRA factors stay high-precision
-on top of the quantized base), or `bake` it directly into a quantized copy.
-Adapter factors default to float32; `--adapter-dtype bfloat16` halves the
-size but can miss small tolerances. `lora_alpha == r` always, so the
-applied LoRA scale is exactly 1.0 and served weights equal base + the
-measured delta, not an approximation of it.
+on top of the quantized base), or `bake` it into a quantized copy (with the
+FP8 caveat above). Adapter factors default to float32; `--adapter-dtype
+bfloat16` halves the size but can miss small tolerances. `lora_alpha == r`
+always, so the applied LoRA scale is exactly 1.0: served weights are the base
+plus the adapter's low-rank factors of the measured delta -- the edit, not
+the storage rounding noise that rides on it, so they can differ from the
+published checkpoint by about that noise.
 
 ## bake (full-checkpoint fallback)
 
@@ -189,7 +232,9 @@ configs). On an **FP8 block-scale base**:
   and **requantized** with fresh block scales (absmax/448); untouched
   tensors keep their original bytes. The output stays a valid FP8
   checkpoint for the same serving stack; edited blocks carry FP8
-  re-rounding noise.
+  re-rounding noise, which is lossy for small edits (see "Precision &
+  quantization": serve the adapter over the FP8 base instead, or use
+  `--output-dtype bfloat16`).
 - `--output-dtype bfloat16`: every tensor is dequantized to BF16, the delta
   is fused exactly, block scales are dropped, and config.json loses its
   `quantization_config`. The accuracy-preserving path, at ~2x disk.
@@ -240,9 +285,11 @@ other base families and other engines welcome.
 
 - **NVFP4 is out of scope for convert** (FP4 grid noise dominates a
   checkpoint-vs-checkpoint diff); convert the BF16 pair and bake instead.
-- **FP8-pair diffs carry quant-grid noise** (~2-3% RMS): use a looser
-  --tol (0.05) than a BF16 pair; flagged tensors in the manifest tell you
-  when the edit does not clear the noise.
+- **Noise-aware acceptance is an estimate.** `within_noise` rests on a model
+  of the BF16/FP8 rounding grid, exercised here on synthetic pairs. An edit
+  smaller than the noise ceiling cannot be told from rounding and is
+  reported as `noise_only` (not carried). Use `eval` to judge accepted
+  tensors; `--noise-margin 0` restores the strict `--tol` rule.
 - **Embedding edits.** Abliteration recipes that orthogonalize the embedding
   matrix change `embed_tokens`; convert writes it in PEFT's
   `lora_embedding_A/B` layout (PEFT merge reproduces it). Engine support for
