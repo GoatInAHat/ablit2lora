@@ -13,6 +13,7 @@ from ablit2lora.quant import (
     dequant_blockwise,
     dtype_family,
     find_scale_key,
+    quantize_blockwise,
     requant_fused,
 )
 from conftest import FP8_BLOCK, ref_dequant
@@ -50,6 +51,31 @@ def test_quant_roundtrip_error_is_tiny(fp8_pair_factory):
     rel = (deq.double() - orig).norm() / orig.norm()
     # e4m3 + bf16 scales: RMS error ~2.7% of the weight norm, well under 5%
     assert rel < 0.05, rel
+
+
+def test_quantize_blockwise_has_no_per_block_gain_error_from_scale_rounding():
+    """Each block's absmax is set so absmax/448 sits 0.3% off the nearest bf16
+    value; coding against the unrounded scale then dequantizes every block
+    with that 0.3% gain error. Coding against the stored (rounded) scale
+    leaves only unbiased e4m3 rounding, which averages out over a block."""
+    block = (128, 128)
+    g = torch.Generator().manual_seed(3)
+    w = torch.randn(256, 256, generator=g)
+    factors = [1.003, 0.997, 1.0035, 0.9965]
+    for i, f in enumerate(factors):
+        r, c = divmod(i, 2)
+        blk = w[r * 128:(r + 1) * 128, c * 128:(c + 1) * 128]
+        s_target = torch.tensor(1.0, dtype=torch.bfloat16).float() * f
+        blk *= (448.0 * s_target) / blk.abs().max()
+    q, scale = quantize_blockwise(w, block)
+    assert scale.dtype == torch.bfloat16
+    deq = dequant_blockwise(q, scale, block)
+    for i in range(len(factors)):
+        r, c = divmod(i, 2)
+        sl = (slice(r * 128, (r + 1) * 128), slice(c * 128, (c + 1) * 128))
+        ref, got = w[sl].double(), deq[sl].double()
+        gain = float((ref * got).sum() / (ref * ref).sum())
+        assert abs(gain - 1.0) < 1e-3, (i, gain)
 
 
 def test_requant_fused_fresh_scales(fp8_pair_factory):

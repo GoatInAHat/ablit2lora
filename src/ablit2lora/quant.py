@@ -123,6 +123,10 @@ def quantize_blockwise(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize a float weight to fp8 e4m3 + blockwise scales (absmax/448).
 
+    The scale is rounded to ``scale_dtype`` first and the codes are computed
+    against that stored scale, so dequantizing with the returned scale has no
+    per-block gain error from the scale's own rounding.
+
     Returns (fp8_weight [out, in], scale [ceil(out/rb), ceil(in/cb)]).
     """
     if w.ndim != 2:
@@ -136,14 +140,16 @@ def quantize_blockwise(
     blocks = padded.reshape(nb_r, rb, nb_c, cb)
     absmax = blocks.abs().amax(dim=(1, 3))
     scale = torch.where(absmax > 0, absmax / E4M3_MAX, torch.ones_like(absmax))
+    scale = scale.to(scale_dtype)
     scale_full = (
-        scale.repeat_interleave(rb, dim=0)
+        scale.float()
+        .repeat_interleave(rb, dim=0)
         .repeat_interleave(cb, dim=1)
         .reshape(nb_r, rb, nb_c, cb)
     )
     q = (padded.reshape(nb_r, rb, nb_c, cb) / scale_full).clamp(-E4M3_MAX, E4M3_MAX)
     q = q.reshape(nb_r * rb, nb_c * cb)[:out_f, :in_f].to(out_dtype)
-    return q, scale.to(scale_dtype)
+    return q, scale
 
 
 def requant_fused(
