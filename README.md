@@ -242,6 +242,14 @@ other base families and other engines welcome.
 - **FP8-pair diffs carry quant-grid noise** (~2-3% RMS): use a looser
   --tol (0.05) than a BF16 pair; flagged tensors in the manifest tell you
   when the edit does not clear the noise.
+- **Embedding edits.** Abliteration recipes that orthogonalize the embedding
+  matrix change `embed_tokens`; convert writes it in PEFT's
+  `lora_embedding_A/B` layout (PEFT merge reproduces it). Engine support for
+  LoRA on embeddings varies: vLLM applies it only for models that declare
+  `embedding_modules`, so check your model class. With
+  `tie_word_embeddings: true` a runtime LoRA edits the input embedding only,
+  not the tied `lm_head` output path (convert records this under `warnings`
+  in manifest.json); `bake` writes the shared weight and is exact.
 - LoRA cannot edit biases, norms, or other non-2D tensors: changes there
   are reported as unrepresentable in manifest.json, never applied.
 - Flagged (retrained) tensors are excluded by default: base+adapter

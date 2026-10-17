@@ -40,7 +40,7 @@ from pathlib import Path
 import torch
 
 from . import __version__
-from .adapter import write_adapter, write_model_card
+from .adapter import is_embedding_module, write_adapter, write_model_card
 from .noise import NoiseModel
 from .quant import block_size_for, dequant_blockwise, dtype_family, find_scale_key
 from .weights import LazyWeights
@@ -589,6 +589,18 @@ def run(
         "counts": counts,
         "tensors": records,
     }
+    warnings: list[str] = []
+    if tied_word_embeddings:
+        for module in sorted(m for m in entries if is_embedding_module(m)):
+            warnings.append(
+                f"{module} is edited and tie_word_embeddings is true: a runtime "
+                "LoRA changes the input embedding only, so the tied lm_head "
+                "output path is NOT edited. `ablit2lora bake` writes the shared "
+                "weight and is exact."
+            )
+    for w in warnings:
+        log.warning(w)
+    manifest["warnings"] = warnings
     manifest["quantization"] = {
         "dequant": quant_method,
         "block_size": list(block_b) if quant_method != "none" else None,

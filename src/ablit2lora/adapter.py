@@ -4,6 +4,14 @@ Converted adapters carry factors with B @ A == delta per module (from the
 SVD in convert.py). Modules may have different true ranks; factors are
 zero-padded to one uniform rank r so a single PEFT config (and vLLM) can
 serve them all, with lora_alpha == r so the applied scale is exactly 1.0.
+
+Embedding modules use PEFT's ``nn.Embedding`` layout instead of the Linear
+one: ``lora_embedding_A`` [r, num_embeddings] and ``lora_embedding_B``
+[embedding_dim, r], no ``.weight`` suffix, with delta = (B @ A).T. PEFT
+silently skips Linear-layout keys on an embedding, so the layout matters.
+In memory (``entries``) every module keeps the Linear convention
+B @ A == delta, A [k, in], B [out, k]; ``write_adapter`` and
+``read_adapter`` translate.
 """
 
 from __future__ import annotations
@@ -15,6 +23,23 @@ import torch
 from safetensors.torch import load_file, save_file
 
 ADAPTER_PREFIX = "base_model.model."
+
+# Last dotted component of a module path that is an nn.Embedding in the
+# common HF architectures (Llama/Qwen/Mistral/GLM, GPT-2/J, OPT/BERT, GPT-NeoX,
+# Llama-style tok_embeddings). Detection is by name: convert only sees
+# safetensors, not module classes.
+EMBEDDING_SUFFIXES = (
+    "embed_tokens",
+    "wte",
+    "word_embeddings",
+    "embed_in",
+    "tok_embeddings",
+)
+
+
+def is_embedding_module(module: str) -> bool:
+    """True if a module path names an input embedding (see EMBEDDING_SUFFIXES)."""
+    return module.rsplit(".", 1)[-1] in EMBEDDING_SUFFIXES
 
 
 def write_adapter(
@@ -29,7 +54,8 @@ def write_adapter(
 
     entries maps module path -> (A [k, in], B [out, k]) with k <= rank.
     Factors are zero-padded to "rank" (padding contributes exactly 0 to
-    B @ A) and stored as "dtype".
+    B @ A) and stored as "dtype". Embedding modules are written in PEFT's
+    embedding layout (lora_embedding_A = B.T, lora_embedding_B = A.T).
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -46,8 +72,12 @@ def write_adapter(
         Bp = torch.zeros(B.shape[0], rank, dtype=dtype)
         Ap[:k] = A.to(dtype)
         Bp[:, :k] = B.to(dtype)
-        state[f"{ADAPTER_PREFIX}{module}.lora_A.weight"] = Ap.contiguous()
-        state[f"{ADAPTER_PREFIX}{module}.lora_B.weight"] = Bp.contiguous()
+        if is_embedding_module(module):
+            state[f"{ADAPTER_PREFIX}{module}.lora_embedding_A"] = Bp.T.contiguous()
+            state[f"{ADAPTER_PREFIX}{module}.lora_embedding_B"] = Ap.T.contiguous()
+        else:
+            state[f"{ADAPTER_PREFIX}{module}.lora_A.weight"] = Ap.contiguous()
+            state[f"{ADAPTER_PREFIX}{module}.lora_B.weight"] = Bp.contiguous()
     config = {
         "auto_mapping": None,
         "base_model_name_or_path": base_model,
@@ -137,19 +167,30 @@ vllm serve {base_model} --enable-lora --lora-modules abliterated={name}
 def read_adapter(
     adapter_dir: str | Path,
 ) -> tuple[dict[str, tuple[torch.Tensor, torch.Tensor]], dict]:
-    """Read an adapter back: module path -> (A, B), plus its config."""
+    """Read an adapter back: module path -> (A, B), plus its config.
+
+    Both layouts come back in the Linear convention (B @ A == delta,
+    A [k, in], B [out, k]); embedding factors are transposed back.
+    """
     d = Path(adapter_dir)
     cfg = json.loads((d / "adapter_config.json").read_text())
     state = load_file(str(d / "adapter_model.safetensors"))
+    layouts = (
+        ("lora_A", ".lora_A.weight", False),
+        ("lora_B", ".lora_B.weight", False),
+        ("lora_A", ".lora_embedding_B", True),
+        ("lora_B", ".lora_embedding_A", True),
+    )
     grouped: dict[str, dict[str, torch.Tensor]] = {}
     for key, tensor in state.items():
         if not key.startswith(ADAPTER_PREFIX):
             raise ValueError(f"unexpected adapter key {key!r}")
         rest = key[len(ADAPTER_PREFIX):]
-        for which in ("lora_A", "lora_B"):
-            suffix = f".{which}.weight"
+        for which, suffix, transposed in layouts:
             if rest.endswith(suffix):
-                grouped.setdefault(rest[: -len(suffix)], {})[which] = tensor
+                grouped.setdefault(rest[: -len(suffix)], {})[which] = (
+                    tensor.T.contiguous() if transposed else tensor
+                )
                 break
     entries = {m: (p["lora_A"], p["lora_B"]) for m, p in grouped.items()}
     return entries, cfg
