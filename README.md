@@ -77,9 +77,10 @@ Per request, the OpenAI `model` field picks the variant: `"model":
 the untouched base. Verify fidelity against the published checkpoint with
 `ablit2lora eval` before relying on the adapter.
 
-GLM-5.3-Flash specifically cannot hot-mount LoRA on today's stock vLLM yet
-(see "Supported base families" below); `bake` + the two-engine fallback is
-the path meanwhile:
+GLM-5.3-Flash LoRA hot-mounting is not validated on stock vLLM: the
+upstream enablement, vllm-project/vllm#56327, is still open (see "Supported
+base families" below). `bake` + the two-engine fallback is the path
+meanwhile:
 
     ablit2lora bake --adapter adapter-abliterated --model <base> \
       --output abliterated-fused
@@ -120,7 +121,7 @@ small, not zero.
 | Base family | convert / bake | Native LoRA serving |
 |---|---|---|
 | Llama / Qwen / GLM-4-MoE-style dense and MoE decoders | architecture-agnostic safetensors-level diff/fuse | works wherever the engine's model class implements `SupportsLoRA` (most mainstream dense and MoE decoders do, on both vLLM and SGLang) |
-| **GLM-5.3-Flash** (arch `glm5_next`, hybrid KDA+MLA+MoE) | converter target today | pending [vllm-project/vllm#56327](https://github.com/vllm-project/vllm/pull/56327) ("[LoRA][Model] Add LoRA support for GLM-5.3-Flash") -- experimental registration plugin included (`src/ablit2lora/vllm_plugins/glm5next_lora.py`, UNVERIFIED, see its docstring); use `bake` meanwhile |
+| **GLM-5.3-Flash** (hybrid KDA+MLA+MoE; the official checkpoints declare `Glm5NextForConditionalGeneration`, the text-only class is `Glm5NextForCausalLM`) | converter target today | pending [vllm-project/vllm#56327](https://github.com/vllm-project/vllm/pull/56327) ("[LoRA][Model] Add LoRA support for GLM-5.3-Flash"). Experimental registration plugin included (`src/ablit2lora/vllm_plugins/glm5next_lora.py`, UNVERIFIED, never run against a live vLLM): it registers a `SupportsLoRA` override for both architecture names, but on vLLM main the ConditionalGeneration class already inherits LoRA support, and the MLA/indexer hooks that #56327 adds cannot be supplied from a plugin; see its docstring. Use `bake` meanwhile |
 
 An experimental GLM-EXL3 activation-projection runtime lives separately in
 the `glm53-ablation-plugin` repo and is out of scope for this general tool.
