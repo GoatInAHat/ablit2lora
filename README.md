@@ -81,6 +81,13 @@ published edits as adapters.
 
 ## Quickstart
 
+Install from a release tag (Python 3.10-3.13; not on PyPI):
+
+    pip install "ablit2lora @ git+https://github.com/GoatInAHat/ablit2lora@v0.4.1"
+
+The wheel and sdist are also attached to each GitHub release. Serving needs
+vLLM or SGLang installed separately.
+
     ablit2lora convert --base <hf-id-or-path> --abliterated <hf-id-or-path> \
       --out adapter-abliterated
 
