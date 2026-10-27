@@ -17,8 +17,9 @@ their scales are split across shards (a per-16-element FP8 `weight_scale`
 plus a per-tensor `weight_scale_2`), and the FP4 grid re-quantizes every
 16 elements independently, so a checkpoint-vs-checkpoint diff is dominated
 by quantization-grid noise rather than by the published edit. Convert the
-BF16 pair instead (zai-org/GLM-5.3-Flash-BF16); adapters stay
-precision-portable and bake handles the quantized serving copy.
+BF16 pair instead (zai-org/GLM-5.3-Flash-BF16). Applying its adapter to a
+quantized base is not equivalent to independently quantizing the variant;
+validate the serving copy against the intended quantized reference.
 """
 
 from __future__ import annotations

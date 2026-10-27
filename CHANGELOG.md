@@ -3,6 +3,16 @@
 Versions follow `pyproject.toml`. Dates are commit dates. Git tags exist for
 v0.2.0, v0.3.0 and v0.3.1 only.
 
+## Unreleased
+
+- Opt-in bounded public HTTP safetensors tensor/row reader with immutable
+  HF revision URLs, byte budgets, range identity checks and typed E8M0 support.
+  The existing `convert` snapshot resolution is unchanged.
+- Offline effective-quantized-delta audit: rank tails without denoising,
+  factor cast/serialization residuals, CPU staged-forward diagnostics and
+  paired logit metrics. Includes a dense-export example and reference runbook.
+  This does not implement EXL3 quantization or add runtime adapter support.
+
 ## 0.4.1 - 2026-10-16
 
 ### Fixed

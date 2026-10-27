@@ -265,6 +265,14 @@ rank-1 difference between independently quantized checkpoints. Compare
 against both the source variant and the deployed quantized stock baseline.
 Likewise, projecting the output of a quantized weight is an edit relative
 to that quantized weight, not necessarily the source checkpoint's delta.
+
+For a target defined as an independently quantized published variant, fit
+`dequant(Q(variant)) - live_base`, including its actual rounding and all
+checkpoint-dependent calibration changes. The [offline reference audit](docs/quantized-reference.md)
+provides bounded public tensor reads, rank/residual sweeps and serialized-factor
+checks on dense exports. It is not an EXL3 quantizer or engine integration;
+the original recipe and a verified reference decoder are prerequisites.
+
 If `Wq = W + E` and the intended edit is `G W`, output projection adds
 `G Wq = G W + G E`; the extra `G E` must be measured, not assumed zero.
 `bake` adds another quantization round trip (with the FP8 caveat above).
