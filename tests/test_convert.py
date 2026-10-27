@@ -106,11 +106,12 @@ def test_retrained_flagged_not_approximated(mixed_pair, tmp_path):
     assert retrained["residual"] >= manifest["tol"]
     assert MODD2 not in cfg["target_modules"]
     assert not any(MODD2 in k for k in state)
-    # zero-padded to the max included rank; padding contributes exactly 0
+    # True factor ranks, with unit global and per-module alpha/r.
     assert cfg["r"] == cfg["lora_alpha"] == 3
     A = state[f"base_model.model.{MOD1}.lora_A.weight"]
     B = state[f"base_model.model.{MOD1}.lora_B.weight"]
-    assert A.shape[0] == 3
+    assert A.shape[0] == 1
+    assert cfg["rank_pattern"] == cfg["alpha_pattern"] == {MOD1: 1, MOD2: 3}
     assert torch.allclose(
         mixed_pair.base[O1] + B @ A, mixed_pair.ablit[O1], atol=1e-4
     )
@@ -150,7 +151,7 @@ def test_manifest_audit_fields(mixed_pair, tmp_path):
     assert manifest["counts"]["exact"] == 2
     assert manifest["counts"]["flagged"] == 1
     assert manifest["counts"]["unchanged"] == 3
-    assert manifest["adapter"]["uniform_rank"] == 3
+    assert manifest["adapter"]["global_rank"] == 3
     assert str(mixed_pair.base_dir) in manifest["vllm_command"]
     assert "--enable-lora" in manifest["vllm_command"]
 
@@ -256,7 +257,10 @@ def test_convert_moe_expert_tensors(moe_pair, tmp_path):
         assert sibling.removesuffix(".weight") not in cfg["target_modules"]
 
     assert sorted(cfg["target_modules"]) == sorted([edited_expert_mod, shared_mod])
-    assert cfg["r"] == cfg["lora_alpha"] == 2  # zero-padded to the larger true rank
+    assert cfg["r"] == cfg["lora_alpha"] == 2  # global capacity is the larger true rank
+    assert cfg["rank_pattern"] == cfg["alpha_pattern"] == {
+        edited_expert_mod: 1, shared_mod: 2,
+    }
 
     A1 = state[f"base_model.model.{edited_expert_mod}.lora_A.weight"]
     B1 = state[f"base_model.model.{edited_expert_mod}.lora_B.weight"]

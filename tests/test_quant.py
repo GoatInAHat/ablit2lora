@@ -236,3 +236,71 @@ def test_bake_fp8_bfloat16_output(fp8_pair_factory, tmp_path):
     # config.json loses its quantization_config
     cfg = json.loads((fused / "config.json").read_text())
     assert "quantization_config" not in cfg
+
+
+def test_typed_e8m0_scale_decodes_exponents_not_byte_values():
+    if not hasattr(torch, "float8_e8m0fnu"):
+        pytest.skip("torch has no typed E8M0 support")
+    assert find_scale_key("m.weight", {"m.weight", "m.scale"}) == "m.scale"
+    scale = torch.tensor([[126, 127], [128, 129]], dtype=torch.uint8)
+    scale = scale.view(torch.float8_e8m0fnu)
+    q = torch.ones(4, 4).to(torch.float8_e4m3fn)
+    got = dequant_blockwise(q, scale, (2, 2))
+    want = torch.tensor([[0.5, 0.5, 1, 1], [0.5, 0.5, 1, 1],
+                         [2, 2, 4, 4], [2, 2, 4, 4]])
+    assert torch.equal(got, want)
+    with pytest.raises(ValueError, match="raw integer"):
+        dequant_blockwise(q, scale.view(torch.uint8), (2, 2))
+
+
+def test_convert_dot_scale_and_unchanged_packed_experts(tmp_path):
+    if not hasattr(torch, "float8_e8m0fnu"):
+        pytest.skip("torch has no typed E8M0 support")
+    from conftest import write_checkpoint
+
+    g = torch.Generator().manual_seed(27)
+    name = "layers.0.attn.wo_b.weight"
+    module = name.removesuffix(".weight")
+    scale_name = "layers.0.attn.wo_b.scale"
+    packed = "layers.0.ffn.experts.0.w2.weight"
+    packed_scale = "layers.0.ffn.experts.0.w2.scale"
+    w = torch.randn(32, 32, generator=g)
+    delta = torch.outer(torch.randn(32, generator=g), torch.randn(32, generator=g))
+    base, ablit = {}, {}
+    for values, dense in ((base, w), (ablit, w + delta)):
+        q, scale = quantize_blockwise(dense, (16, 16),
+                                     scale_dtype=torch.float8_e8m0fnu)
+        values[name] = q
+        values[scale_name] = scale
+        values[packed] = torch.zeros(32, 16, dtype=torch.uint8)
+        values[packed_scale] = torch.ones(1, 1).to(torch.float8_e8m0fnu)
+    bdir = write_checkpoint(tmp_path / "base", base)
+    adir = write_checkpoint(tmp_path / "ablit", ablit)
+    out = tmp_path / "adapter"
+    convert.run(str(bdir), str(adir), out=str(out), tol=0.1)
+    manifest = json.loads((out / "manifest.json").read_text())
+    recs = {r["name"]: r for r in manifest["tensors"]}
+    assert recs[name]["status"] == "exact"
+    assert recs[scale_name]["status"] == "scale_tensor"
+    assert recs[packed_scale]["status"] == "scale_tensor"
+    assert packed not in recs
+    assert manifest["counts"]["precision_mismatch"] == 0
+    cfg = json.loads((out / "adapter_config.json").read_text())
+    assert cfg["target_modules"] == [module]
+    baked = tmp_path / "baked"
+    bake.run(str(out), str(bdir), str(baked))
+    state = load_file(str(baked / "model.safetensors"))
+    assert torch.equal(state[packed], base[packed])
+    assert torch.equal(state[packed_scale].view(torch.uint8),
+                       base[packed_scale].view(torch.uint8))
+    assert state[scale_name].dtype == torch.float8_e8m0fnu
+
+    # A packed expert's scale-only edit is a real change, never unchanged.
+    ablit[packed_scale] = torch.full((1, 1), 2.).to(torch.float8_e8m0fnu)
+    write_checkpoint(adir, ablit)
+    out2 = tmp_path / "adapter2"
+    convert.run(str(bdir), str(adir), out=str(out2), tol=0.1)
+    recs2 = {r["name"]: r for r in json.loads((out2 / "manifest.json").read_text())["tensors"]}
+    assert recs2[packed]["status"] == "quant_unsupported"
+    with pytest.raises(ValueError, match="packed experts"):
+        bake.run(str(out), str(bdir), str(tmp_path / "bf16"), output_dtype="bfloat16")

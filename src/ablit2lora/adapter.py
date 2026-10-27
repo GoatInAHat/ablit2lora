@@ -2,8 +2,10 @@
 
 Converted adapters carry factors with B @ A == delta per module (from the
 SVD in convert.py). Modules may have different true ranks; factors are
-zero-padded to one uniform rank r so a single PEFT config (and vLLM) can
-serve them all, with lora_alpha == r so the applied scale is exactly 1.0.
+stored at their true ranks, with matching rank_pattern and alpha_pattern
+entries so every module's applied scale is exactly 1.0. Global r and
+lora_alpha are equal too, for engines using the global scale. An engine
+must still support mixed-rank tensors; this does not prove loader support.
 
 Embedding modules use PEFT's ``nn.Embedding`` layout instead of the Linear
 one: ``lora_embedding_A`` [r, num_embeddings] and ``lora_embedding_B``
@@ -53,25 +55,31 @@ def write_adapter(
     """Write a PEFT-compatible LoRA adapter directory.
 
     entries maps module path -> (A [k, in], B [out, k]) with k <= rank.
-    Factors are zero-padded to "rank" (padding contributes exactly 0 to
-    B @ A) and stored as "dtype". Embedding modules are written in PEFT's
-    embedding layout (lora_embedding_A = B.T, lora_embedding_B = A.T).
+    Factors retain their true rank k and are stored as "dtype". Matching
+    per-module rank and alpha patterns preserve unit scaling. "rank" is
+    the global rank/capacity bound, not a request to pad the factors.
+    Embedding modules use PEFT's embedding layout (lora_embedding_A = B.T,
+    lora_embedding_B = A.T).
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     if rank < 1:
         raise ValueError("adapter rank must be >= 1")
     state: dict[str, torch.Tensor] = {}
+    ranks: dict[str, int] = {}
     for module, (A, B) in sorted(entries.items()):
+        if A.ndim != 2 or B.ndim != 2:
+            raise ValueError(f"{module}: LoRA factors must both be 2-D")
         k = A.shape[0]
+        if k < 1:
+            raise ValueError(f"{module}: factor rank must be >= 1")
         if B.shape[1] != k:
             raise ValueError(f"{module}: A rank {k} != B rank {B.shape[1]}")
         if k > rank:
             raise ValueError(f"{module}: rank {k} exceeds adapter rank {rank}")
-        Ap = torch.zeros(rank, A.shape[1], dtype=dtype)
-        Bp = torch.zeros(B.shape[0], rank, dtype=dtype)
-        Ap[:k] = A.to(dtype)
-        Bp[:, :k] = B.to(dtype)
+        ranks[module] = k
+        Ap = A.detach().to(device="cpu", dtype=dtype, copy=True).contiguous()
+        Bp = B.detach().to(device="cpu", dtype=dtype, copy=True).contiguous()
         if is_embedding_module(module):
             state[f"{ADAPTER_PREFIX}{module}.lora_embedding_A"] = Bp.T.contiguous()
             state[f"{ADAPTER_PREFIX}{module}.lora_embedding_B"] = Ap.T.contiguous()
@@ -96,7 +104,8 @@ def write_adapter(
         "modules_to_save": None,
         "peft_type": "LORA",
         "r": rank,
-        "rank_pattern": {},
+        "rank_pattern": ranks,
+        "alpha_pattern": dict(ranks),
         "revision": None,
         "target_modules": sorted(entries),
         "task_type": "CAUSAL_LM",

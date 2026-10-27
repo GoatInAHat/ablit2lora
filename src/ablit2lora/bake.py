@@ -45,7 +45,7 @@ from .weights import LazyWeights
 log = logging.getLogger(__name__)
 
 _FUSE_SUFFIX = ".weight"
-_SCALE_SUFFIXES = (".weight_scale_inv", ".weight_scale")
+_SCALE_SUFFIXES = (".weight_scale_inv", ".weight_scale", ".scale")
 
 
 def _weight_of_scale(scale_key: str) -> str | None:
@@ -113,6 +113,18 @@ def run(
         if dtype_family(weights.tensors[key].dtype) == "fp8"
         and find_scale_key(key, names) is not None
     }
+    packed = {
+        key for key in names
+        if key.endswith(".weight") and find_scale_key(key, names) is not None
+        and key not in fp8_keys
+    }
+    if packed and (output_dtype == "bfloat16" or any(
+        key.removesuffix(".weight") in entries for key in packed
+    )):
+        raise ValueError(
+            "cannot dequantize or edit non-FP8 block-quantized weights; "
+            "packed experts require a format-aware decoder"
+        )
     is_fp8 = bool(fp8_keys)
     mode = (
         "bfloat16_out"

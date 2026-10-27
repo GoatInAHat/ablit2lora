@@ -44,7 +44,7 @@ FP4_DTYPES = (
     "F4_E3M",
 )
 
-_SCALE_SUFFIXES = (".weight_scale_inv", ".weight_scale")
+_SCALE_SUFFIXES = (".weight_scale_inv", ".weight_scale", ".scale")
 
 
 def find_scale_key(weight_key: str, available) -> str | None:
@@ -103,7 +103,15 @@ def expand_block_scale(
             f"scale shape {tuple(scale.shape)} does not match block grid "
             f"{(nb_r, nb_c)} for weight {tuple(shape)} with block {block}"
         )
-    s = scale.float().repeat_interleave(rb, dim=0)[:out_f]
+    if not scale.is_floating_point():
+        raise ValueError(
+            "block scales must be floating-point values (including typed E8M0); "
+            "raw integer scale bytes need explicit format decoding"
+        )
+    decoded = scale.float()
+    if not torch.isfinite(decoded).all() or not (decoded > 0).all():
+        raise ValueError("block scales must decode to finite positive values")
+    s = decoded.repeat_interleave(rb, dim=0)[:out_f]
     return s.repeat_interleave(cb, dim=1)[:, :in_f]
 
 
