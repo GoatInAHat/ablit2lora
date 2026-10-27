@@ -79,17 +79,18 @@ def test_write_adapter_uses_peft_embedding_layout_and_read_adapter_inverts_it(tm
     ])
     emb_a = state[f"{ADAPTER_PREFIX}{EMBED}.lora_embedding_A"]
     emb_b = state[f"{ADAPTER_PREFIX}{EMBED}.lora_embedding_B"]
-    assert tuple(emb_a.shape) == (rank, vocab)
-    assert tuple(emb_b.shape) == (hidden, rank)
-    assert torch.equal(emb_a[:k], B_e.T) and not emb_a[k:].any()
-    assert torch.equal(emb_b[:, :k], A_e.T) and not emb_b[:, k:].any()
+    assert tuple(emb_a.shape) == (k, vocab)
+    assert tuple(emb_b.shape) == (hidden, k)
+    assert torch.equal(emb_a, B_e.T)
+    assert torch.equal(emb_b, A_e.T)
     # PEFT applies (B @ A).T for embeddings; that must equal the delta B_e @ A_e
     assert torch.allclose((emb_b @ emb_a).T, B_e @ A_e, atol=1e-6)
 
-    entries, _cfg = read_adapter(out)
+    entries, cfg = read_adapter(out)
+    assert cfg["rank_pattern"] == cfg["alpha_pattern"] == {EMBED: k, O_PROJ: k}
     assert sorted(entries) == sorted([EMBED, O_PROJ])
     A_back, B_back = entries[EMBED]
-    assert tuple(A_back.shape) == (rank, hidden) and tuple(B_back.shape) == (vocab, rank)
+    assert tuple(A_back.shape) == (k, hidden) and tuple(B_back.shape) == (vocab, k)
     assert torch.allclose(B_back @ A_back, B_e @ A_e, atol=1e-6)
     A_back, B_back = entries[O_PROJ]
     assert torch.allclose(B_back @ A_back, B_l @ A_l, atol=1e-6)

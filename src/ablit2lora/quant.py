@@ -17,8 +17,9 @@ their scales are split across shards (a per-16-element FP8 `weight_scale`
 plus a per-tensor `weight_scale_2`), and the FP4 grid re-quantizes every
 16 elements independently, so a checkpoint-vs-checkpoint diff is dominated
 by quantization-grid noise rather than by the published edit. Convert the
-BF16 pair instead (zai-org/GLM-5.3-Flash-BF16); adapters stay
-precision-portable and bake handles the quantized serving copy.
+BF16 pair instead (zai-org/GLM-5.3-Flash-BF16). Applying its adapter to a
+quantized base is not equivalent to independently quantizing the variant;
+validate the serving copy against the intended quantized reference.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ FP4_DTYPES = (
     "F4_E3M",
 )
 
-_SCALE_SUFFIXES = (".weight_scale_inv", ".weight_scale")
+_SCALE_SUFFIXES = (".weight_scale_inv", ".weight_scale", ".scale")
 
 
 def find_scale_key(weight_key: str, available) -> str | None:
@@ -103,7 +104,15 @@ def expand_block_scale(
             f"scale shape {tuple(scale.shape)} does not match block grid "
             f"{(nb_r, nb_c)} for weight {tuple(shape)} with block {block}"
         )
-    s = scale.float().repeat_interleave(rb, dim=0)[:out_f]
+    if not scale.is_floating_point():
+        raise ValueError(
+            "block scales must be floating-point values (including typed E8M0); "
+            "raw integer scale bytes need explicit format decoding"
+        )
+    decoded = scale.float()
+    if not torch.isfinite(decoded).all() or not (decoded > 0).all():
+        raise ValueError("block scales must decode to finite positive values")
+    s = decoded.repeat_interleave(rb, dim=0)[:out_f]
     return s.repeat_interleave(cb, dim=1)[:, :in_f]
 
 

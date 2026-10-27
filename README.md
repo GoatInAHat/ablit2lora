@@ -73,8 +73,8 @@ published edits as adapters.
    spacing at every element), so the same rule covers BF16, FP16 and FP8.
    `--noise-margin 0` turns the allowance off and gives the strict `--tol`
    rule only.
-3. **Emit**: a PEFT-compatible adapter directory (factors zero-padded to a
-   uniform rank, lora_alpha == r so the LoRA scale is exactly 1.0), a
+3. **Emit**: a PEFT-compatible adapter directory (true per-module ranks
+   with matching `rank_pattern`/`alpha_pattern`, unit LoRA scale), a
    manifest.json (per-tensor sha refs, delta norm, chosen rank, residual,
    status, noise estimates, warnings), a Hub-ready README.md model card, and
    the ready-to-run vLLM serve command.
@@ -226,12 +226,16 @@ grid exercised here on synthetic pairs, so confirm accepted tensors with
   precision it was computed at. LoRA on a BF16/FP16 base is fully supported
   by every serving engine here.
 - **FP8 pair** (block-scale `float8_e4m3fn` + `<module>.weight_scale_inv`,
-  GLM-5.3-Flash-style 128x128 blocks): both sides are dequantized
+  GLM-5.3-Flash-style 128x128 blocks, or `.scale` with typed E8M0
+  scales and the checkpoint's configured block size): both sides are dequantized
   automatically before the diff; manifest.json records the dequant method
   and per-tensor block-scale provenance. The noise estimate uses the FP8
   grid of each block times its block scale. LoRA on an FP8 base is supported
   for major architectures on recent vLLM; upgrade vLLM or `bake` if yours
-  rejects the adapter.
+  rejects the adapter. Typed E8M0 requires PyTorch/safetensors support for
+  that dtype. Raw integer scale bytes are refused rather than decoded as
+  ordinary numbers. Unchanged packed experts and their scales can be
+  skipped; changed packed experts are not converted to dense adapters.
 - **NVFP4/MXFP4 (ModelOpt) is out of scope for convert**: the FP4 grid
   re-quantizes every 16 elements and its scales are split across shards
   (per-16 `weight_scale` + per-tensor `weight_scale_2`), so a
@@ -252,12 +256,27 @@ over it (`--enable-lora`; LoRA applies the delta at runtime in the LoRA
 dtype, on top of the quantized base) or `bake --output-dtype bfloat16`. An
 FP8 `bake` is a valid checkpoint but not a faithful copy of a small edit.
 
-The adapter itself is precision-portable: compute it once from a
-matching-precision pair, then serve that same adapter over any quantization
-of the same base via `--enable-lora` (the LoRA factors stay high-precision
-on top of the quantized base), or `bake` it into a quantized copy (with the
-FP8 caveat above). Adapter factors default to float32; `--adapter-dtype
-bfloat16` halves the size but can miss small tolerances. `lora_alpha == r`
+An adapter can be applied over another quantization of the same base when
+its runtime supports the architecture and target modules. This is algebraic
+portability, not a claim of unchanged precision or capability:
+`Q(W) + BA` generally differs from `Q(W + BA)`. Quantization error depends
+on the edited weights too, so a rank-1 source edit need not produce a
+rank-1 difference between independently quantized checkpoints. Compare
+against both the source variant and the deployed quantized stock baseline.
+Likewise, projecting the output of a quantized weight is an edit relative
+to that quantized weight, not necessarily the source checkpoint's delta.
+
+For a target defined as an independently quantized published variant, fit
+`dequant(Q(variant)) - live_base`, including its actual rounding and all
+checkpoint-dependent calibration changes. The [offline reference audit](docs/quantized-reference.md)
+provides bounded public tensor reads, rank/residual sweeps and serialized-factor
+checks on dense exports. It is not an EXL3 quantizer or engine integration;
+the original recipe and a verified reference decoder are prerequisites.
+
+If `Wq = W + E` and the intended edit is `G W`, output projection adds
+`G Wq = G W + G E`; the extra `G E` must be measured, not assumed zero.
+`bake` adds another quantization round trip (with the FP8 caveat above).
+Adapter factors default to float32; `--adapter-dtype bfloat16` halves the size but can miss small tolerances. `lora_alpha == r`
 always, so the applied LoRA scale is exactly 1.0: served weights are the base
 plus the adapter's low-rank factors of the measured delta -- the edit, not
 the storage rounding noise that rides on it, so they can differ from the
@@ -301,8 +320,13 @@ backend preferred; transformers fallback.
 
 ## Disk savings
 
-Adapter bytes = sum over converted modules of (in_dim + out_dim) x
-dtype_size x rank.
+Adapter tensor bytes = sum over converted modules of (in_dim + out_dim) x
+dtype_size x that module's true rank. `rank_pattern` and `alpha_pattern`
+match, with global `r == lora_alpha == max(rank_pattern.values())` for
+converter output. A runtime must support these mixed-rank tensors; unit
+scale alone does not establish loader compatibility. Runtime pools may pad
+each module to the global maximum rank and allocate multiple adapter slots,
+so smaller files do not guarantee the same GPU-memory savings.
 
 | Artifact | Size (order of magnitude) |
 |---|---|

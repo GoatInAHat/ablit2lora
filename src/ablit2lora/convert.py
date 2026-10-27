@@ -243,14 +243,17 @@ def _nvfp4_blocker(path: str) -> str | None:
 
 
 def _scale_keys(w: LazyWeights) -> set[str]:
-    """Names of block-scale tensors that belong to fp8 weights."""
+    """Names of block scales, including unsupported packed-quant weights.
+
+    Their equality is checked with the parent weight; they must never be
+    mistaken for independently adaptable floating-point weight matrices.
+    """
     names = set(w.keys())
     out: set[str] = set()
     for name in names:
-        if dtype_family(w.tensors[name].dtype) == "fp8":
-            sk = find_scale_key(name, names)
-            if sk:
-                out.add(sk)
+        sk = find_scale_key(name, names)
+        if sk:
+            out.add(sk)
     return out
 
 
@@ -427,9 +430,26 @@ def run(
         sha_b, sha_a = tensor_sha256(Wb), tensor_sha256(Wa)
         rec["sha_base"], rec["sha_ablit"] = sha_b, sha_a
         same = sha_b == sha_a and rb.dtype == ra.dtype
+        sk_b = find_scale_key(name, names_b)
+        sk_a = find_scale_key(name, names_a)
+        if fam_b != "fp8" and (sk_b is not None or sk_a is not None):
+            # Packed FP4/other quantization is not a dense integer matrix.
+            # Unchanged bytes AND scales are safe to skip, changed ones are
+            # not representable by treating their codes as numeric weights.
+            if sk_b is not None and sk_a is not None:
+                rec["sha_scale_base"] = tensor_sha256(bw.get(sk_b))
+                rec["sha_scale_ablit"] = tensor_sha256(aw.get(sk_a))
+            if (
+                same and sk_b is not None and sk_a is not None
+                and rec["sha_scale_base"] == rec["sha_scale_ablit"]
+            ):
+                n_unchanged += 1
+            else:
+                rec["status"] = "quant_unsupported"
+                rec["reason"] = "changed non-FP8 block-quantized weight or scale"
+                records.append(rec)
+            continue
         if fam_b == "fp8":
-            sk_b = find_scale_key(name, names_b)
-            sk_a = find_scale_key(name, names_a)
             if sk_b is None or sk_a is None:
                 rec["status"] = "precision_mismatch"
                 rec["reason"] = "fp8 weight without a block-scale tensor"
@@ -646,21 +666,22 @@ def run(
             f"and flag reasons{hint}"
         )
 
-    uniform_rank = max(A.shape[0] for A, _ in entries.values())
+    global_rank = max(A.shape[0] for A, _ in entries.values())
     out_dir = write_adapter(
         out,
         base_model=base,
         entries=entries,
-        rank=uniform_rank,
+        rank=global_rank,
         dtype=_DTYPE_MAP[adapter_dtype],
     )
     write_model_card(out_dir, base_model=base)
     adapter_bytes = (out_dir / "adapter_model.safetensors").stat().st_size
-    cmd = _lora_serve_hint(base, str(out_dir), uniform_rank)
+    cmd = _lora_serve_hint(base, str(out_dir), global_rank)
     manifest["adapter"] = {
         "path": str(out_dir),
-        "uniform_rank": uniform_rank,
-        "lora_alpha": uniform_rank,
+        "global_rank": global_rank,
+        "rank_pattern": {module: A.shape[0] for module, (A, _) in entries.items()},
+        "lora_alpha": global_rank,
         "dtype": adapter_dtype,
         "bytes": adapter_bytes,
         "target_modules": len(entries),
@@ -669,8 +690,8 @@ def run(
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
     print(
-        f"adapter: {out_dir} ({len(entries)} modules, uniform rank {uniform_rank}, "
-        f"lora_alpha={uniform_rank}, dtype={adapter_dtype}, "
+        f"adapter: {out_dir} ({len(entries)} modules, maximum rank {global_rank}, "
+        f"lora_alpha={global_rank}, dtype={adapter_dtype}, "
         f"{adapter_bytes / 1e6:.1f} MB)"
     )
     print(
