@@ -5,6 +5,13 @@ v0.2.0, v0.3.0 and v0.3.1 only.
 
 ## Unreleased
 
+- Export true per-module PEFT ranks with matching alpha patterns and independent
+  factor storage; report the global rank and per-module ranks in the manifest.
+- Decode typed FP8 block scales, recognize `.scale`, and refuse unsupported
+  changed packed-expert formats rather than fitting their storage codes.
+- Clarify precision portability and distinguish exact weight-space targets
+  from independently quantized functional-reference comparisons.
+
 - Opt-in bounded public HTTP safetensors tensor/row reader with immutable
   HF revision URLs, byte budgets, range identity checks and typed E8M0 support.
   The existing `convert` snapshot resolution is unchanged.

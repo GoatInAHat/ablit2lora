@@ -14,8 +14,11 @@ recovered current recipe. Fit **Delta_eff = T - S**. A fitted adapter's real
 arithmetic candidate is `S + scale*B*A`, with an additional implementation
 error from factor storage, GEMMs, activation/output casts and reductions.
 
-`Q_theta(Wstock)` must first reproduce `S`. Matching a nominal bpw or EXL3
-version is insufficient. Freeze/recover the quantizer implementation and
+Record a stock control `S_control = decode(Q_theta(Wstock))` using the same
+reference pipeline, and measure its distance from `S`. A byte-identical replay
+is required only when byte identity is the acceptance target; an independent
+quantization can use a different rounding realization. Matching a nominal bpw
+or EXL3 version alone is insufficient. Freeze/recover the quantizer implementation and
 architecture port, calibration token IDs/order and capture precision, allocation
 rules, Hessian/LDLQ/trellis parameters, codebook/scales/rotations, RNG states,
 tie-break behavior, dtype handling, quantization traversal, and packing rules.
@@ -88,6 +91,14 @@ edit; report both. No threshold is silently selected, and no tail is erased by
 the source converter's noise model. Samples establish sample-specific results
 only. A high/full-rank quantization delta may require a large correction or
 cannot meet a given small-adapter budget.
+
+A strict weight-space target and a functional-equivalence target are different
+contracts. For functional qualification, retain the full residual diagnostics
+and compare matched activations, logits and behavior, with the independently
+quantized stock control as a separate recipe/noise-floor diagnostic. Do not
+quietly substitute a low-rank source edit or a relaxed weight-space threshold
+for an unmet target. Declare the functional acceptance criterion before
+collecting the candidate results.
 
 ## Runtime and whole-model acceptance (separate gate)
 
